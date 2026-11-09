@@ -201,7 +201,7 @@ function driveStore_(root) {
       if(!child(f,version.folderId,'text/html')||f.name!==`page-${index}.html`||f.appProperties?.shssPagePath!==page.path||!f.capabilities?.canDownload)notFound();
       return f;
     },
-    readHtml: f=>readCachedText(f,8*1024*1024),
+    readHtml: f=>readCachedText(f,SHSSCore.limits.html),
     commentsFile(docId,id) {
       const f=meta(id);
       return child(f,docId,'application/json')&&f.name==='comments.json'&&f.capabilities?.canDownload ? {id,canEdit:writable(f),meta:f} : null;
@@ -212,7 +212,7 @@ function driveStore_(root) {
       const f=meta(id);
       if(!f)notFound();
       if(!/\.html?$/i.test(f.name)||!['text/html','text/plain','application/octet-stream'].includes(f.mimeType))fail('UNSUPPORTED','単一のHTMLファイルを指定してください。');
-      const text=blobText(f,2*1024*1024);
+      const text=blobText(f,SHSSCore.limits.html);
       if(f.sha256Checksum&&f.sha256Checksum.toLowerCase()!==digest_(text))fail('VERSION_MISMATCH','元のHTMLが読み込み中に変更されました。');
       return {text,version:f.version||null};
     },

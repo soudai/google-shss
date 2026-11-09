@@ -15,4 +15,7 @@ dialog{width:min(460px,calc(100% - 24px));border:1px solid var(--line);border-ra
 
 #save-list li{padding:12px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}#save-list p{white-space:pre-wrap}#save-details{font-size:12px}#import-status{color:var(--muted)}
 
+#external-url{overflow-wrap:anywhere;unicode-bidi:isolate}
+#external-open{color:inherit;padding:6px 10px}
+
 #region-help{margin:0;padding:8px 12px;background:var(--quote);border-bottom:1px solid var(--line);font-size:12px}

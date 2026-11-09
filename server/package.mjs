@@ -1,6 +1,6 @@
 import {parse,serialize} from 'parse5';
 import * as cssTree from 'css-tree';
-import {AppError,utf8Size} from './html.mjs';
+import {AppError,isExternalLink,utf8Size} from './html.mjs';
 import {sanitizeSvg} from './svg.mjs';
 import {decodeBase64,utf8} from './zip.mjs';
 import {validateRaster} from './image.mjs';
@@ -62,9 +62,15 @@ function walkCssImages(ast,visit) {
   });
 }
 
-export function sanitizeHtmlImages(html) {
+function rewriteExternalLink(node,href) {
+  node.attrs=node.attrs.filter(a=>!['target','ping','download','data-shss-page','data-shss-fragment','data-shss-external'].includes(a.name));
+  node.attrs.push({name:'data-shss-external',value:href.value.trim()});
+  href.value='#';
+}
+
+export function sanitizeHtml(html) {
   const doc=parse(html);
-  let hasSvg=false;
+  let hasSvg=false,rewroteLink=false;
   const normalize=raw=>{
     const image=imageData(raw);
     if(!image?.svg)return raw;
@@ -89,6 +95,7 @@ export function sanitizeHtmlImages(html) {
   while(pending.length){
     const node=pending.pop();
     for(const a of node.attrs||[]){
+      if(isExternalLink(node,a)){rewriteExternalLink(node,a);rewroteLink=true;}
       if(['src','href','poster','background'].includes(a.name))a.value=normalize(a.value);
       if(a.name==='style')a.value=normalizeCss(a.value,'declarationList');
     }
@@ -100,7 +107,7 @@ export function sanitizeHtmlImages(html) {
     if(node.content)pending.push(node.content);
     for(const child of node.childNodes||[])pending.push(child);
   }
-  return {html:hasSvg?serialize(doc):html,hasSvg};
+  return {html:hasSvg||rewroteLink?serialize(doc):html,hasSvg};
 }
 export function canonicalPackageHash(pkg,digest) {
   const sorted=[...pkg.files].map(([path,file])=>({path,mime:file.mime,size:file.bytes.length,sha256:digest(file.bytes),sortKey:utf8Bytes(path)}));
@@ -201,6 +208,7 @@ export function renderPackage(pkg,started=Date.now()) {
         if(['srcset','imagesrcset'].includes(a.name))a.value=srcset(a.value,page,files);
         if(tag==='img'&&a.name==='src'){const ref=resolve(a.value,page,files),file=files.get(ref.path);if(!file.mime.startsWith('image/'))fail('UNRESOLVED_REFERENCE',`画像ではありません: ${ref.path}`);a.value=dataUrl(file);}
         if(tag==='a'&&a.name==='href'){
+          if(isExternalLink(node,a)){rewriteExternalLink(node,a);continue;}
           const ref=resolve(a.value,page,files,{page:true});
           if(!pages.includes(ref.path))fail('UNRESOLVED_REFERENCE',`HTMLページではありません: ${ref.path}`);
           if(ref.same&&ref.fragment)a.value='#'+ref.fragment;

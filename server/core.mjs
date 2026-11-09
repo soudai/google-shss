@@ -1,8 +1,8 @@
 import {AppError, checkHtml, limits, utf8Size} from './html.mjs';
 import {inspectZip} from './zip.mjs';
-import {renderPackage,utf8Bytes,sanitizeHtmlImages,canonicalPackageHash} from './package.mjs';
+import {renderPackage,utf8Bytes,sanitizeHtml,canonicalPackageHash} from './package.mjs';
 import {sanitizeSvg,SVG_POLICY_VERSION} from './svg.mjs';
-export {AppError};
+export {AppError,limits};
 export {SVG_POLICY_VERSION};
 
 const fail = (code, message) => {throw new AppError(code, message);};
@@ -152,7 +152,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     }
     if ((typeof input.html==='string')===token(input.sourceFileId)) invalid();
     const file=token(input.sourceFileId)?store.readSource(input.sourceFileId):null;
-    const {html,hasSvg}=sanitizeHtmlImages(checkHtml(file?file.text:input.html));
+    const {html,hasSvg}=sanitizeHtml(checkHtml(file?file.text:input.html));
     return {type:'html',html:checkHtml(html),
       ...(hasSvg?{svgPolicyVersion:SVG_POLICY_VERSION}:{}),
       ...(file?{sourceFileId:input.sourceFileId,sourceVersion:file.version}:{})};

@@ -1,9 +1,10 @@
 import {Inflate} from 'fflate';
 import {AppError} from './html.mjs';
 import {validateRaster} from './image.mjs';
+import {maxImportBytes,maxImportMiB} from './limits.mjs';
 
 const MiB=1024*1024;
-export const zipLimits={compressed:5*MiB,total:20*MiB,entries:200,files:100,pages:20,file:2*MiB,svg:512*1024,ratio:100,elapsed:20000};
+export const zipLimits={compressed:maxImportBytes,total:20*MiB,entries:200,files:100,pages:20,file:2*MiB,svg:512*1024,ratio:100,elapsed:20000};
 const fail=(code,message)=>{throw new AppError(code,message);};
 const u16=(b,i)=>b[i]|b[i+1]<<8;
 const u32=(b,i)=>(b[i]|b[i+1]<<8|b[i+2]<<16|b[i+3]<<24)>>>0;
@@ -45,16 +46,16 @@ function imageType(name,bytes) {
   const good=ext==='png'&&bytes.length>=24&&ascii(0,8)==='\x89PNG\r\n\x1a\n'||['jpg','jpeg'].includes(ext)&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255||ext==='gif'&&['GIF87a','GIF89a'].includes(ascii(0,6))||ext==='webp'&&ascii(0,4)==='RIFF'&&ascii(8,4)==='WEBP';
   if(!good)fail('UNSUPPORTED_TYPE',`画像形式が一致しません: ${name}`);
 }
-export function decodeBase64(value) {
-  if(typeof value!=='string'||value.length>Math.ceil(zipLimits.compressed/3)*4+4||value.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(value))fail('INVALID_ARCHIVE','ZIPのbase64が不正です。');
+export function decodeBase64(value,maxBytes=5*MiB) {
+  if(typeof value!=='string'||value.length>Math.ceil(maxBytes/3)*4+4||value.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(value))fail('INVALID_ARCHIVE','ZIPのbase64が不正です。');
   const chars='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',out=new Uint8Array(value.length/4*3-(value.endsWith('==')?2:value.endsWith('=')?1:0));
   let pos=0;
   for(let i=0;i<value.length;i+=4){const n=chars.indexOf(value[i])<<18|chars.indexOf(value[i+1])<<12|(value[i+2]==='='?0:chars.indexOf(value[i+2]))<<6|(value[i+3]==='='?0:chars.indexOf(value[i+3]));out[pos++]=n>>>16;if(pos<out.length)out[pos++]=n>>>8&255;if(pos<out.length)out[pos++]=n&255;}
   return out;
 }
 export function inspectZip(input,started=Date.now()) {
-  const bytes=typeof input==='string'?decodeBase64(input):input;
-  if(!(bytes instanceof Uint8Array)||bytes.length>zipLimits.compressed||bytes.length<22)fail('INVALID_ARCHIVE','ZIPが空または5 MiBを超えています。');
+  const bytes=typeof input==='string'?decodeBase64(input,zipLimits.compressed):input;
+  if(!(bytes instanceof Uint8Array)||bytes.length>zipLimits.compressed||bytes.length<22)fail('INVALID_ARCHIVE','ZIPが空または'+maxImportMiB+' MiBを超えています。');
   const checkTime=()=>{if(Date.now()-started>zipLimits.elapsed)fail('PROCESSING_TIMEOUT','ZIPの検査が20秒を超えました。');};
   let eocd=-1;
   for(let i=bytes.length-22;i>=Math.max(0,bytes.length-65557);i--)if(u32(bytes,i)===0x06054b50&&i+22+u16(bytes,i+20)===bytes.length){eocd=i;break;}
