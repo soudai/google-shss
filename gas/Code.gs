@@ -4,7 +4,9 @@
 
 const FOLDER_MIME_='application/vnd.google-apps.folder';
 const MAX_JSON_BYTES_=1024*1024;
-const LOCK_TIMEOUT_MS_=7000;
+// Writes hold the lock for a few seconds (a comment post or a manifest update),
+// so a short queue of writers from several users fits in this wait.
+const LOCK_TIMEOUT_MS_=20000;
 // CacheService values are limited to 100 KB.
 const CACHE_MAX_BYTES_=80000;
 // Largest file downloaded in parallel; UrlFetchApp responses are limited to 50 MB.
@@ -17,7 +19,9 @@ function toSignedBytes_(bytes) {return Array.from(bytes,b=>b>127?b-256:b);}
 
 function timestamp_() {return new Date().toISOString().replace(/[:.]/g,'-');}
 
-// Runs fn while holding the script-wide lock that serializes all writes.
+// Runs fn while holding the script-wide lock that serializes writes to shared
+// files (comments.json and manifest.json). When the lock is not free in time it
+// throws busy() before running fn, so a busy request wrote nothing and can be resent.
 function withScriptLock_(fn, busy) {
   const lock=LockService.getScriptLock();
   if(!lock.tryLock(LOCK_TIMEOUT_MS_))throw busy();
@@ -355,7 +359,11 @@ function driveStore_(root) {
       }
       return {versionId,folderId,startPage:pkg.startPage,files,pages,...(files.some(f=>f.mime==='image/svg+xml')?{svgPolicyVersion:SHSSCore.SVG_POLICY_VERSION}:{})};
     },
-    writeManifest: (d,m)=>write(d.manifestId,'application/json',JSON.stringify(m))
+    writeManifest: (d,m)=>write(d.manifestId,'application/json',JSON.stringify(m)),
+    // Trashes a version folder that was never recorded in the manifest.
+    discardVersion(folderId) {
+      if(idOk(folderId))Drive.Files.update({trashed:true},folderId,null,{fields:'id',supportsAllDrives:true});
+    }
   };
 }
 

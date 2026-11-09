@@ -31,7 +31,8 @@ export function service(createService, options = {}) {
     store,
     actor: () => options.actor ? options.actor() : actor,
     uuid: () => `id${++uuid}`,
-    now: () => new Date(clock += 1000).toISOString()
+    now: () => new Date(clock += 1000).toISOString(),
+    ...(options.locked ? {locked: options.locked} : {})
   });
   return {run, store, actor};
 }

@@ -74,7 +74,7 @@ test('CommentOutbox serializes, deduplicates and retries', async () => {
     sent.push(request.operationId);
     if (fail) throw Object.assign(new Error('nope'), {code: 'INTERNAL'});
     return {status: 'applied', operationId: request.operationId, comments: {revision: 1, threads: []}};
-  });
+  }, {retryDelays: []});
   const request = {documentId: 'd', versionId: 'v', sourceHash: 's', type: 'add', payload: {body: 'x'}, operationId: 'o1'};
   const entry = outbox.enqueue(request, {});
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -87,6 +87,28 @@ test('CommentOutbox serializes, deduplicates and retries', async () => {
   assert.equal(outbox.entries.length, 0);
   assert.equal(outbox.snapshots.get(pageKey(request)).result.revision, 1);
   assert.equal(outbox.prefer(request, {revision: 0, canWrite: true, threads: []}).revision, 1);
+});
+
+test('CommentOutbox resends momentary failures with the same operationId', async () => {
+  const sent = [], waits = [];
+  const errors = [new Error('lost'), Object.assign(new Error('x'), {code: 'INTERNAL'})];
+  const outbox = new CommentOutbox(async request => {
+    sent.push(request.operationId);
+    if (errors.length) throw errors.shift();
+    return {status: 'applied', operationId: request.operationId, comments: {revision: 1, threads: []}};
+  }, {wait: async ms => {waits.push(ms);}});
+  const request = {documentId: 'd', versionId: 'v', sourceHash: 's', type: 'add', payload: {body: 'x'}, operationId: 'o1'};
+  outbox.enqueue(request, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(sent, ['o1', 'o1', 'o1']);
+  assert.deepEqual(waits, [2000, 5000]);
+  assert.equal(outbox.entries.length, 0);
+
+  // Errors that a resend cannot fix fail at once.
+  const rejected = new CommentOutbox(async () => {throw Object.assign(new Error('x'), {code: 'FORBIDDEN'});}, {wait: async () => assert.fail('no wait')});
+  const entry = rejected.enqueue({...request, operationId: 'o2'}, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(entry.state, 'failed');
 });
 
 test('TitleTask coalesces renames', async () => {

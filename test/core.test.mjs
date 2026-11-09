@@ -145,6 +145,51 @@ test('versions: append, reimport from Drive source, and isolate comments', () =>
   fails(() => run('getDocument', {documentId: first.documentId, versionId: 'nope'}), 'NOT_FOUND');
 });
 
+test('the write lock covers only shared files, not uploads', () => {
+  // Records what the store writes while the lock is held.
+  let holding = false, busy = false;
+  const writes = [];
+  const locked = fn => {
+    if (busy) throw new AppError('BUSY', 'busy', true);
+    holding = true;
+    try {return fn();} finally {holding = false;}
+  };
+  const {run, store} = service(createService, {locked});
+  for (const name of ['createDocument', 'createVersion', 'createPackageVersion', 'writeManifest', 'writeComments']) {
+    const original = store[name];
+    store[name] = (...args) => {writes.push([name, holding]); return original.apply(store, args);};
+  }
+  // A new document is written without the lock.
+  const created = run('importDocument', {title: 'Zip', zipBase64: zipBase64({'index.html': html('<p>a</p>')})});
+  assert.deepEqual(writes, [['createDocument', false], ['createPackageVersion', false]]);
+
+  // A new version is uploaded first; only the manifest update is locked.
+  writes.length = 0;
+  const appended = run('appendVersion', {documentId: created.documentId, html: html('<p>b</p>')});
+  assert.deepEqual(writes, [['createVersion', false], ['writeManifest', true]]);
+  assert.equal(run('getDocument', {documentId: created.documentId}).versionId, appended.versionId);
+
+  // Comment posts take the lock.
+  writes.length = 0;
+  const doc = run('getDocument', {documentId: created.documentId});
+  submit(run, doc, 'add', {anchor: textAnchor('b'), body: 'x'});
+  assert.deepEqual(writes, [['writeComments', true]]);
+
+  // When the lock is busy, the uploaded version is discarded and the manifest is unchanged.
+  busy = true;
+  writes.length = 0;
+  fails(() => run('appendVersion', {documentId: created.documentId, html: html('<p>c</p>')}), 'BUSY');
+  assert.equal(store.discarded.length, 1);
+  busy = false;
+  assert.equal(run('getDocument', {documentId: created.documentId}).versions.length, 2);
+
+  // A Drive source re-import must find the earlier document under the lock.
+  const sourceFileId = store.addSource(html('<p>d</p>'));
+  writes.length = 0;
+  run('importDocument', {title: 'Drive', sourceFileId});
+  assert.deepEqual(writes, [['createDocument', true], ['createVersion', true]]);
+});
+
 test('imports ZIP packages with multiple pages', () => {
   const {run} = service(createService);
   const zipped = zipBase64({'index.html': html('<a href="two.html">two</a>'), 'two.html': html('<img src="p.png">'), 'p.png': png()});

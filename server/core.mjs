@@ -229,13 +229,19 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       : {...store.createVersion(record.manifest.versionsFolderId,versionId,selected.html),sourceHash:digest(selected.html),createdAt:now(),...(selected.sourceFileId?{sourceFileId:selected.sourceFileId,sourceVersion:selected.sourceVersion}:{}),
           ...(selected.svgPolicyVersion===undefined?{}:{svgPolicyVersion:selected.svgPolicyVersion})};
   }
-  // Adds a version to an existing document. Call while holding the lock.
-  function addVersion(d, selected) {
+  function checkAppend(d) {
     if(!store.canAppend(d)) denied();
     if(d.manifest.versions.length>=MAX_VERSIONS) fail('TOO_LARGE','版の上限に達しました。');
-    const v=writeVersion(d,selected);
+  }
+  // Records a written version in the manifest. Call while holding the lock.
+  function commitVersion(d, selected, v) {
     store.writeManifest(d,{...d.manifest,schemaVersion:selected.type==='package'?2:d.manifest.schemaVersion,latestVersionId:v.versionId,updatedAt:now(),versions:[...d.manifest.versions,v]});
     return {documentId:d.id,versionId:v.versionId};
+  }
+  // Adds a version to an existing document. Call while holding the lock.
+  function addVersion(d, selected) {
+    checkAppend(d);
+    return commitVersion(d,selected,writeVersion(d,selected));
   }
   // Applies one comment operation to the state in place and returns the thread ID.
   function apply(s,op,v,pagePath,actor,ts) {
@@ -350,26 +356,46 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       if(!title(input.title)) invalid();
       if(!store.canImport()) denied();
       const selected=source(input);
+      const create=()=>store.createDocument(input.title.trim(), record=>{
+        const v=writeVersion(record,selected);
+        return {...record.manifest,schemaVersion:selected.type==='package'?2:1,documentId:record.id,title:input.title.trim(),latestVersionId:v.versionId,versions:[v]};
+      },selected.sourceFileId);
+      // A new document shares nothing with other writers, so it is written
+      // without the lock. Large ZIPs take a while and would block every
+      // comment post meanwhile.
+      if(!selected.sourceFileId)return create();
       return locked(()=>{
         if(!store.canImport()) denied();
         // Re-importing a Drive file appends to the document created from it.
-        const existing=selected.sourceFileId&&store.findImportedSource(selected.sourceFileId);
+        const existing=store.findImportedSource(selected.sourceFileId);
         if(existing) {
           const d=document(existing),last=d.manifest.versions.at(-1);
           if(last.sourceHash===digest(selected.html)&&last.svgPolicyVersion===selected.svgPolicyVersion)return {documentId:d.id,versionId:last.versionId};
           return addVersion(d,selected);
         }
-        return store.createDocument(input.title.trim(), record=>{
-          const v=writeVersion(record,selected);
-          return {...record.manifest,schemaVersion:selected.type==='package'?2:1,documentId:record.id,title:input.title.trim(),latestVersionId:v.versionId,versions:[v]};
-        },selected.sourceFileId);
+        return create();
       });
     },
     appendVersion(input) {
       const prior=document(input.documentId);
-      if(!store.canAppend(prior))denied();
+      checkAppend(prior);
       const selected=source(input);
-      return locked(()=>addVersion(document(input.documentId),selected));
+      // The version files go into a new folder no one else writes to; only the
+      // manifest update needs the lock.
+      const v=writeVersion(prior,selected);
+      let committing=false;
+      try {
+        return locked(()=>{
+          const d=document(input.documentId);
+          checkAppend(d);
+          committing=true;
+          return commitVersion(d,selected,v);
+        });
+      } catch(error) {
+        // Unreferenced files are removed, unless the manifest write may have succeeded.
+        if(!committing)try {store.discardVersion?.(v.folderId);}catch{/* best effort */}
+        throw error;
+      }
     },
     submitOperation(input,actor) {
       const op=operation(input);
