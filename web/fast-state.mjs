@@ -15,7 +15,9 @@ export class PreviewCache {
         const {html,...details}=entry.value;
         const value={...structuredClone(details),html};
         if(this.now()-entry.savedAt>30000){
-          value.comments=null;value.commentsError={message:'コメントを更新中…'};
+          // Keep the last discussion visible while it revalidates. Its stale
+          // epoch must not enable posting until a fresh snapshot arrives.
+          value.commentsStale=true;
         }
         return value;
       }
@@ -54,6 +56,17 @@ export class PreviewCache {
     }).finally(()=>{if(this.requests.get(key)===promise)this.requests.delete(key);});
     this.requests.set(key,promise);return promise;
   }
+  // A completed save is already a checked snapshot. Keep it with the page so
+  // navigating away and back does not briefly show an empty discussion.
+  updateComments(input,comments) {
+    for(const entry of [...this.entries.values()]){
+      const d=entry.value;
+      if(d.documentId===input.documentId&&d.versionId===input.versionId
+        &&d.pagePath===(input.pagePath||'index.html')&&d.sourceHash===input.sourceHash&&d.canReadComments){
+        this.remember(input,{...d,comments,commentsError:null});
+      }
+    }
+  }
   clearComments(documentId) {
     this.epoch++;this.requests.clear();
     for(const entry of this.entries.values())if(entry.value.documentId===documentId){
@@ -77,15 +90,19 @@ export class PreviewCache {
 
 // A provisional view only. IDs, authors and timestamps are replaced by the server.
 export function optimisticComments(threads,{type,payload,operationId},now=new Date().toISOString()) {
-  const next=structuredClone(threads);
+  // Only copy the thread being edited. Large discussions and a queue of
+  // comments should not repeatedly clone every message and anchor.
+  const next=threads.slice();
   const existing=next.find(t=>t.messages.some(m=>m.operationId===operationId));
   if(existing&&(type==='add'||type==='reply'))return {threads:next,threadId:existing.id};
   const message={id:'pending-'+operationId,body:payload.body?.trim(),author:{displayName:'自分'},createdAt:now,canDelete:false,pending:true};
   const threadId=type==='add'?'pending-'+operationId:payload.threadId;
   if(type==='add')next.push({id:threadId,anchor:payload.anchor,status:'open',messages:[message]});
   else {
-    const thread=next.find(t=>t.id===threadId);
-    if(thread) {
+    const index=next.findIndex(t=>t.id===threadId);
+    if(index!==-1) {
+      const thread={...next[index],messages:[...next[index].messages]};
+      next[index]=thread;
       if(type==='reply')thread.messages.push(message);
       if(type==='delete')thread.messages=thread.messages.filter(m=>m.id!==payload.messageId);
       if(type==='hide'||type==='restore')thread.status=type==='hide'?'hidden':'open';

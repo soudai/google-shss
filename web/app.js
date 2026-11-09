@@ -49,6 +49,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     changed:scheduleOutboxRender,
     saved:(entry,result)=>{
       previews.clearComments(entry.request.documentId);
+      previews.updateComments(entry.request,result.comments);
       if(current&&pageKey(current)===pageKey(entry.request)&&current.canReadComments){
         if(selected==='pending-'+entry.request.operationId)selected=result.threadId;
         revision=null;applyComments({...result.comments,canWrite:current.canWriteComments},false);
@@ -58,7 +59,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     },
     failed:(entry,error)=>{
       if(!current||pageKey(current)!==pageKey(entry.request))return;
-      if(error.code==='FORBIDDEN'||error.code==='NOT_FOUND'){current.canWriteComments=false;previews.clear();outbox.snapshots.delete(pageKey(current));}
+      if(error.code==='FORBIDDEN'||error.code==='NOT_FOUND'){current.canWriteComments=false;current.canPrepareComment=false;current.canQueueComment=false;previews.clear();outbox.snapshots.delete(pageKey(current));}
       const {type,payload}=entry.request;
       if(type==='add'&&!draft){draft=payload.anchor;$('body').value=entry.meta.body;selected='draft';panel(true);}
       if(type==='reply'&&!replyId){replyId=payload.threadId;replyDrafts.set(replyId,entry.meta.body);panel(true);}
@@ -217,7 +218,10 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
       if(draft)pageDrafts.set(draftKey(current),{draft,body:$('body').value});
       draft=null;selected=null;found=null;$('body').value='';
     }
-    current={...d,canWriteComments:!provisional&&d.canWriteComments,canPrepareComment:provisional&&d.canWriteComments,canAppend:!provisional&&d.canAppend};
+    current={...d,canWriteComments:!provisional&&d.canWriteComments,
+      canPrepareComment:provisional&&d.canWriteComments,
+      canQueueComment:provisional&&d.canWriteComments&&!!d.comments&&!d.commentsStale,
+      canAppend:!provisional&&d.canAppend};
     validating=provisional;$('title').textContent=d.title;bar(true);
     $('load-status').textContent=provisional?'更新を確認中…':'';
     $('pages').replaceChildren(...d.pages.map(path=>{const option=create('option',path);option.value=path;return option;}));
@@ -227,7 +231,8 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
       dropFrame();mountPreview(d,openingAt);
       if(fragment){const target=frame,expected=context;target.addEventListener('load',()=>{if(frame===target)target.contentWindow.postMessage({...expected,type:'fragment',fragment},'*');},{once:true});}
     }
-    // Cached comments are a preview; permission must be rechecked before any edit.
+    // Cached comments are provisional. A new post can be queued immediately;
+    // submitOperation checks current Drive permissions and the page hash.
     if(d.comments) {
       revision=null;
       applyComments(provisional?{...d.comments,canWrite:false}:d.comments);
@@ -345,7 +350,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
   }
   function renderComposer() {
     $('compose').hidden=!draft;$('selection').textContent=draft?.type==='region'?'図の領域':draft?.exact||'';
-    $('submit').disabled=!current?.canWriteComments||outbox.entries.length>=outbox.limit;$('body').disabled=!current?.canWriteComments&&!current?.canPrepareComment;$('cancel').disabled=false;
+    $('submit').disabled=(!current?.canWriteComments&&!current?.canQueueComment)||outbox.entries.length>=outbox.limit;$('body').disabled=!current?.canWriteComments&&!current?.canPrepareComment;$('cancel').disabled=false;
   }
   function render() {
     threads=outbox.active(current).reduce((view,entry)=>optimisticComments(view,entry.request).threads,confirmedThreads);
@@ -395,7 +400,8 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     updateLocations();renderComposer();
   }
   function mutate(type,payload) {
-    if(!current?.canWriteComments||validating||payload.threadId&&outbox.busy(current,payload.threadId))return;
+    const canQueue=type==='add'&&current?.canQueueComment;
+    if((!current?.canWriteComments&&!canQueue)||(validating&&!canQueue)||payload.threadId&&outbox.busy(current,payload.threadId))return;
     const d=current,{documentId,versionId,sourceHash}=d;
     const request={documentId,versionId,sourceHash,type,payload,...(d.pagePath!=='index.html'||d.pages.length>1?{pagePath:d.pagePath}:{}),...(commentEpoch?{epoch:commentEpoch}:{}),operationId:crypto.randomUUID()};
     const timing=$('comment-status');timing.dataset.feedbackMs='';timing.dataset.saveMs='';timing.dataset.saveOutcome='pending';
@@ -424,7 +430,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     $('region-help').hidden=!enabled;
   }
   $('region-toggle').onclick=()=>{
-    if(!current?.canWriteComments){notify('コメントを投稿する権限が必要です。');return;}
+    if(!current?.canWriteComments&&!current?.canPrepareComment){notify('コメントを投稿する権限が必要です。');return;}
     setRegionMode(!regionMode);panel(true);sync();
   };
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&regionMode){setRegionMode(false);sync();}});

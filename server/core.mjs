@@ -378,7 +378,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
         if(!file?.canEdit) denied();
         verifyHtml(ref);
         if(op.sourceHash!==v.sourceHash) fail('VERSION_MISMATCH','開いている版を再読み込みしてください。');
-        const s=state(d,file),requestHash=digest(JSON.stringify(op));
+        const s=state(d,file,true),requestHash=digest(JSON.stringify(op));
         if(s.epoch!==undefined&&op.epoch!==s.epoch)fail('VERSION_MISMATCH','コメントが復旧されています。再読み込みしてください。');
         const seen=s.appliedOperations.find(o=>o.operationId===op.operationId);
         if(seen) {
