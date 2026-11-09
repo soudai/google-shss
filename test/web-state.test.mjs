@@ -19,14 +19,15 @@ test('PreviewCache reuses HTML when the server reports it unchanged', async () =
   assert.equal(second.htmlUnchanged, undefined);
 });
 
-test('PreviewCache expires, evicts and hides stale comments', () => {
+test('PreviewCache expires, evicts and marks older comments provisional', () => {
   let now = 0;
   const cache = new PreviewCache(null, {now: () => now, maxEntries: 2});
   for (const versionId of ['a', 'b', 'c']) cache.remember({documentId: 'd', versionId}, doc({versionId}));
   assert.equal(cache.peek({documentId: 'd', versionId: 'a'}), null);
   assert.ok(cache.peek({documentId: 'd', versionId: 'c'}).comments);
   now = 31000;
-  assert.equal(cache.peek({documentId: 'd', versionId: 'c'}).comments, null);
+  assert.equal(cache.peek({documentId: 'd', versionId: 'c'}).commentsStale, true);
+  assert.deepEqual(cache.peek({documentId: 'd', versionId: 'c'}).comments, {threads: []});
   now = 301000;
   assert.equal(cache.peek({documentId: 'd', versionId: 'c'}), null);
 });

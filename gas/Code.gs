@@ -48,12 +48,27 @@ function rpc(action, input) {
         return fn();
       }, () => new SHSSCore.AppError('BUSY','保存が混み合っています。再試行してください。',true))
     });
-    return {ok:true,value:run(action,input)};
+    const value=run(action,input);
+    return {ok:true,value:action==='getDocument'&&input?.acceptHtmlGzip===true?packDocument_(value):value};
   } catch(error) {
     if(error instanceof SHSSCore.AppError) return {ok:false,error:{code:error.code,message:error.message,retryable:error.retryable}};
     console.error('SHSS RPC failed');
     return {ok:false,error:{code:'INTERNAL',message:'処理に失敗しました。時間をおいて再試行してください。',retryable:true}};
   }
+}
+
+// Keep old clients compatible. Compress only substantial pages and only when
+// base64 is smaller; the unchanged-page response already omits the body.
+function packDocument_(value) {
+  if(typeof value.html!=='string'||value.html.length<65536)return value;
+  try {
+    const packed=Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(value.html,'text/html')).getBytes());
+    if(packed.length<value.html.length*0.9){
+      const {html,...rest}=value;
+      return {...rest,htmlGzip:packed};
+    }
+  }catch(e){console.warn('Preview compression unavailable');}
+  return value;
 }
 
 function configuration_() {
@@ -112,7 +127,9 @@ function driveStore_(root) {
     if(metadata.has(id))return metadata.get(id);
     try {
       const f=Drive.Files.get(id,{fields,supportsAllDrives:true});
-      return f.trashed?null:f;
+      const value=f.trashed?null:f;
+      metadata.set(id,value);
+      return value;
     }catch(e){if(unavailable(e))return null;throw e;}
   }
   const child=(f,parent,mime)=>!!(f&&f.mimeType===mime&&f.parents?.includes(parent));
@@ -133,12 +150,41 @@ function driveStore_(root) {
       }
     }catch(e){console.warn('Drive metadata prefetch unavailable');}
   }
+  // Cache lookup paths, never permissions. A warm open/save can fetch all
+  // ancestors and the page's metadata together. Every result is still checked
+  // against the current manifest, Drive capabilities, parents and checksum.
+  const pathHints=new Map();
+  const hintKey=id=>'document-path:'+digest_(root+':'+id);
+  function readPathHint(id) {
+    try {
+      const hint=JSON.parse(CacheService.getUserCache().get(hintKey(id))||'null');
+      if(hint&&[hint.versionsFolderId,hint.folderId,hint.versionId].every(idOk)
+        &&/^(?:index|page-\d{1,2})\.html$/.test(hint.pageName)) {
+        pathHints.set(id,hint);
+        return hint;
+      }
+    }catch(e){console.warn('Path hint unavailable');}
+    return null;
+  }
+  function rememberPathHint(ref) {
+    const hint={versionsFolderId:ref.versionsFolderId,folderId:ref.v.folderId,versionId:ref.v.versionId,
+      pageName:ref.page?'page-'+ref.v.pages.indexOf(ref.page)+'.html':'index.html'};
+    if(JSON.stringify(pathHints.get(ref.documentId))===JSON.stringify(hint))return;
+    try {CacheService.getUserCache().put(hintKey(ref.documentId),JSON.stringify(hint),300);}
+    catch(e){console.warn('Path hint unavailable');}
+  }
   function prepareDocuments(ids) {
     const pending=ids.filter(id=>idOk(id)&&!preparedDocuments.has(id));
     if(!pending.length)return;
     for(const id of pending)preparedDocuments.add(id);
     const parents=pending.map(id=>"'"+id+"' in parents").join(' or ');
-    prefetch(["("+parents+") and (name = 'manifest.json' or name = 'comments.json' or name = 'versions')"]);
+    const clauses=["("+parents+") and (name = 'manifest.json' or name = 'comments.json' or name = 'versions')"];
+    const hint=pending.length===1?readPathHint(pending[0]):null;
+    if(hint){
+      clauses.push("('"+hint.versionsFolderId+"' in parents and name = '"+hint.versionId+"')");
+      clauses.push("('"+hint.folderId+"' in parents and name = '"+hint.pageName+"')");
+    }
+    prefetch(clauses);
   }
   const sha256Hex=bytes=>hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
   // Contents fetched in parallel by preloadFiles, by file ID. Each is used once.
@@ -173,7 +219,9 @@ function driveStore_(root) {
     return {text,sha256};
   }
   const cacheable=file=>!!file?.version&&Number(file.size)<=CACHE_MAX_BYTES_&&file.capabilities?.canDownload===true;
-  const cacheKey=file=>'file-text:'+digest_(file.id+':'+file.version);
+  // The checksum also binds cached bytes when Drive metadata and a concurrent
+  // download describe different versions. No cache is used without canDownload.
+  const cacheKey=file=>'file-text:'+digest_(file.id+':'+file.version+':'+(file.sha256Checksum||''));
   // Texts loaded in bulk from the user cache by preloadFiles, keyed like the cache.
   const cachedTexts=new Map();
   // Loads several files at once: cached texts in one CacheService call, and the
@@ -245,7 +293,7 @@ function driveStore_(root) {
   }
   function canAdd(id) {const f=meta(id);return f?.mimeType===folder && f.capabilities?.canAddChildren===true;}
   return {
-    clearMetadata() {metadata.clear();preparedDocuments.clear();cachedTexts.clear();downloads.clear();},
+    clearMetadata() {metadata.clear();preparedDocuments.clear();cachedTexts.clear();downloads.clear();pathHints.clear();},
     preloadFiles,
     prefetchVersions(refs) {
       const clauses=new Set();
@@ -260,6 +308,7 @@ function driveStore_(root) {
         }
       }
       prefetch([...clauses]);
+      if(refs.length===1)rememberPathHint(refs[0]);
     },
     listSources(cursor) {
       const page=list(root,`mimeType = 'text/html'`,20,cursor);
@@ -311,8 +360,17 @@ function driveStore_(root) {
       const f=meta(id);
       return child(f,docId,'application/json')&&f.name==='comments.json'&&f.capabilities?.canDownload ? {id,canEdit:writable(f),meta:f} : null;
     },
-    readComments: (f,{cached=false}={})=>cached?readCachedText(f.meta,MAX_JSON_BYTES_):blobText(f.meta,MAX_JSON_BYTES_),
-    writeComments: (f,text)=>write(f.id,'application/json',text)?.version,
+    // Writes re-read metadata under the lock. A version+checksum-bound cache
+    // can then avoid downloading the same JSON again, including on retries.
+    readComments: (f,{cached=false}={})=>cached&&f.meta.sha256Checksum?readCachedText(f.meta,MAX_JSON_BYTES_):blobText(f.meta,MAX_JSON_BYTES_),
+    writeComments(f,text) {
+      const version=write(f.id,'application/json',text)?.version;
+      if(version)try {
+        const saved={...f.meta,version,sha256Checksum:digest_(text),size:Utilities.newBlob(text).getBytes().length};
+        if(cacheable(saved))CacheService.getUserCache().put(cacheKey(saved),text,300);
+      }catch(e){console.warn('Saved comment cache unavailable');}
+      return version;
+    },
     readSource(id) {
       const f=meta(id);
       if(!f)notFound();

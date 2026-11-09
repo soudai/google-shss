@@ -35,6 +35,12 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 Use **保存状況** (Save status) to check progress and retry eligible failures. If SHSS could not confirm the outcome of an import, check the library before selecting the file again to avoid creating a duplicate.
 
+### Display and save responsiveness
+
+Previously fetched pages display from the current tab's memory cache. When recent comment data is available, you can post a new comment while the page is being revalidated. Confirmed comments also appear immediately when you return to a page. Failed posts restore your input and can be retried through **保存状況** (Save status). Keep the tab open until saving completes.
+
+Large preview HTML is transferred with gzip compression. Drive reads are grouped, and comment saves check current permissions, the file version and checksum inside the write lock before reusing cached JSON. Initial loads and confirmed saves still depend on Apps Script, Drive and network latency; completion within one second is not guaranteed.
+
 ## Requirements
 
 - A Google Workspace account with access to Apps Script and Google Drive
