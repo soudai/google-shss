@@ -1,7 +1,8 @@
 import {parse} from 'parse5';
 import {AppError,MiB,utf8Size} from './util.mjs';
+import {maxImportBytes,maxImportMiB} from './limits.mjs';
 
-export const limits = {html: 2 * MiB, json: MiB, body: 2000, threads: 500};
+export const limits = {html: maxImportBytes, json: MiB, body: 2000, threads: 500};
 
 // Elements that can navigate, embed other documents or submit data. Single-file
 // HTML additionally rejects <link>; ZIP packages inline stylesheet links instead.
@@ -16,6 +17,15 @@ const unsupported = what => {throw new AppError('UNSUPPORTED', `${what}は対象
 const notHtml = () => unsupported('HTML以外の形式（ZIPを含む）');
 
 export const styleText = node => node.childNodes.map(n => n.value || '').join('');
+
+// An <a href="https://..."> link. Such links are kept, rewritten to
+// data-shss-external, and opened only after the viewer confirms them.
+export function isExternalLink(node,attr) {
+  if(node.tagName!=='a'||node.namespaceURI!=='http://www.w3.org/1999/xhtml'||attr.name!=='href')return false;
+  // Apps Script has no URL constructor. The viewer also parses the address before use.
+  const value=attr.value.trim();
+  return value.length<=2048&&!/[\x00-\x20\x7f\\]/.test(value)&&/^https:\/\/[^/?#@]+(?:[/?#]|$)/i.test(value);
+}
 
 function css(text) {
   if (/@import\b/i.test(text)) unsupported('CSSの@import');
@@ -37,18 +47,20 @@ function checkElement(node) {
   if (tag === 'script' && node.namespaceURI === 'http://www.w3.org/2000/svg') unsupported('SVG内のscript');
   if (tag === 'meta' && node.attrs.some(a => a.name === 'http-equiv')) unsupported('meta http-equiv');
   if (tag === 'style') css(styleText(node));
-  for (const {name, value} of node.attrs || []) {
+  for (const attr of node.attrs || []) {
+    const {name, value} = attr;
     if (name === 'style') css(value);
     if (['srcset','imagesrcset','srcdoc'].includes(name)) unsupported(name);
-    if (RESOURCE_ATTRIBUTES.has(name)) checkUrl(tag, name, value);
+    if (RESOURCE_ATTRIBUTES.has(name) && value.trim() && !isExternalLink(node, attr)) checkUrl(tag, name, value);
   }
 }
 
-// Checks that a single HTML file is self-contained: no external loads, links or
-// embedded documents. Returns the source unchanged.
+// Checks that a single HTML file is self-contained: no external loads or
+// embedded documents, and links only to fragments or https:// pages.
+// Returns the source unchanged.
 export function checkHtml(source) {
   if (typeof source !== 'string') notHtml();
-  if (source.length > limits.html || utf8Size(source) > limits.html) throw new AppError('TOO_LARGE', 'HTMLは2 MiBまでです。');
+  if (source.length > limits.html || utf8Size(source) > limits.html) throw new AppError('TOO_LARGE', 'HTMLは'+maxImportMiB+' MiBまでです。');
   const tree = parse(source);
   const start = source.trimStart();
   const startsWithComment = start.startsWith('<!--');

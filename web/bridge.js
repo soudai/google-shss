@@ -260,8 +260,12 @@
   window.addEventListener('securitypolicyviolation',()=>send('blocked'));
   document.addEventListener('DOMContentLoaded',()=>{
     document.addEventListener('click',event=>{
-      const link=event.target.closest?.('a[data-shss-page]');if(!link)return;
+      const link=event.target.closest?.('a[data-shss-page],a[data-shss-external]');if(!link)return;
       event.preventDefault();event.stopImmediatePropagation();
+      if(link.hasAttribute('data-shss-external')){
+        if(event.isTrusted)send('external-link',{href:link.getAttribute('data-shss-external')});
+        return;
+      }
       send('page',{targetPath:link.getAttribute('data-shss-page'),fragment:link.getAttribute('data-shss-fragment')||''});
     },true);
     document.documentElement.append(layer,dragBox);

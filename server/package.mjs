@@ -1,6 +1,6 @@
 import {parse,serialize} from 'parse5';
 import * as cssTree from 'css-tree';
-import {ASSET_ATTRIBUTES,BLOCKED_TAGS,RESOURCE_ATTRIBUTES,styleText} from './html.mjs';
+import {ASSET_ATTRIBUTES,BLOCKED_TAGS,RESOURCE_ATTRIBUTES,isExternalLink,styleText} from './html.mjs';
 import {MiB,encodeBase64,fail,utf8Bytes,utf8Size} from './util.mjs';
 import {sanitizeSvg} from './svg.mjs';
 import {decodeBase64,utf8} from './zip.mjs';
@@ -54,11 +54,20 @@ function imageData(raw) {
   return {};
 }
 
-// Sanitizes every SVG data: URL in a single-file HTML document (attributes,
-// style attributes and <style> elements) and validates raster data: URLs.
-export function sanitizeHtmlImages(html) {
+// Moves an https:// link to data-shss-external. The preview bridge reports a
+// click on it and the viewer asks for confirmation before opening it.
+function rewriteExternalLink(node,href) {
+  node.attrs=node.attrs.filter(a=>!['target','ping','download','data-shss-page','data-shss-fragment','data-shss-external'].includes(a.name));
+  node.attrs.push({name:'data-shss-external',value:href.value.trim()});
+  href.value='#';
+}
+
+// Prepares a single-file HTML document for storage: sanitizes every SVG data:
+// URL (attributes, style attributes and <style> elements), validates raster
+// data: URLs and rewrites external links.
+export function sanitizeHtml(html) {
   const doc=parse(html);
-  let hasSvg=false;
+  let hasSvg=false,rewroteLink=false;
   const normalize=raw=>{
     const image=imageData(raw);
     if(!image?.svg)return raw;
@@ -83,6 +92,7 @@ export function sanitizeHtmlImages(html) {
   while(pending.length){
     const node=pending.pop();
     for(const a of node.attrs||[]){
+      if(isExternalLink(node,a)){rewriteExternalLink(node,a);rewroteLink=true;}
       if(ASSET_ATTRIBUTES.has(a.name))a.value=normalize(a.value);
       if(a.name==='style')a.value=normalizeCss(a.value,'declarationList');
     }
@@ -94,7 +104,7 @@ export function sanitizeHtmlImages(html) {
     if(node.content)pending.push(node.content);
     for(const child of node.childNodes||[])pending.push(child);
   }
-  return {html:hasSvg?serialize(doc):html,hasSvg};
+  return {html:hasSvg||rewroteLink?serialize(doc):html,hasSvg};
 }
 
 const compareBytes=(a,b)=>{
@@ -225,6 +235,7 @@ export function renderPackage(pkg,started=Date.now()) {
       if(['srcset','imagesrcset'].includes(a.name))a.value=srcset(a.value,page,files);
       if(tag==='img'&&a.name==='src')a.value=dataUrl(asset(a.value,page,files,isImage,'画像ではありません').file);
       if(tag==='a'&&a.name==='href'){
+        if(isExternalLink(node,a)){rewriteExternalLink(node,a);return;}
         const ref=resolve(a.value,page,files,{page:true});
         if(!pages.includes(ref.path))fail('UNRESOLVED_REFERENCE',`HTMLページではありません: ${ref.path}`);
         if(ref.same&&ref.fragment)a.value='#'+ref.fragment;

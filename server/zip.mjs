@@ -1,10 +1,11 @@
 import {Inflate} from 'fflate';
 import {AppError,KiB,MiB,decodeBase64 as decodeBase64Bytes,decodeUtf8,fail} from './util.mjs';
 import {validateRaster} from './image.mjs';
+import {maxImportBytes,maxImportMiB} from './limits.mjs';
 
 // A strict ZIP reader: single disk, no ZIP64, stored or deflated entries only,
 // with every byte of the archive accounted for by exactly one entry.
-export const zipLimits={compressed:5*MiB,total:20*MiB,entries:200,files:100,pages:20,file:2*MiB,svg:512*KiB,ratio:100,elapsed:20000};
+export const zipLimits={compressed:maxImportBytes,total:20*MiB,entries:200,files:100,pages:20,file:2*MiB,svg:512*KiB,ratio:100,elapsed:20000};
 
 const MIME_TYPES=new Map(Object.entries({html:'text/html',htm:'text/html',js:'text/javascript',css:'text/css',svg:'image/svg+xml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp'}));
 const TEXT_EXTENSIONS=new Set(['html','htm','js','css','svg']);
@@ -21,7 +22,8 @@ const extension=name=>name.toLowerCase().split('.').pop();
 const ignored=name=>name.startsWith('__MACOSX/')||name==='.DS_Store';
 
 export const utf8=bytes=>decodeUtf8(bytes,'INVALID_ARCHIVE','ZIP内のUTF-8が不正です。');
-export const decodeBase64=value=>decodeBase64Bytes(value,zipLimits.compressed,'INVALID_ARCHIVE','ZIPのbase64が不正です。');
+// The default limit applies to image data: URLs; inspectZip passes the archive limit.
+export const decodeBase64=(value,maxBytes=5*MiB)=>decodeBase64Bytes(value,maxBytes,'INVALID_ARCHIVE','ZIPのbase64が不正です。');
 
 function nameFor(bytes,flags,isDirectory) {
   if(bytes.length>240)fail('UNSAFE_PATH','ZIP内のパスが240 bytesを超えています。');
@@ -131,8 +133,8 @@ function packageFile(name,content) {
 // Validates a ZIP (base64 or bytes) and returns its files keyed by path, the
 // HTML pages, and the start page when it can be chosen automatically.
 export function inspectZip(input,started=Date.now()) {
-  const bytes=typeof input==='string'?decodeBase64(input):input;
-  if(!(bytes instanceof Uint8Array)||bytes.length>zipLimits.compressed||bytes.length<22)fail('INVALID_ARCHIVE','ZIPが空または5 MiBを超えています。');
+  const bytes=typeof input==='string'?decodeBase64(input,zipLimits.compressed):input;
+  if(!(bytes instanceof Uint8Array)||bytes.length>zipLimits.compressed||bytes.length<22)fail('INVALID_ARCHIVE','ZIPが空または'+maxImportMiB+' MiBを超えています。');
   const checkTime=()=>{if(Date.now()-started>zipLimits.elapsed)fail('PROCESSING_TIMEOUT','ZIPの検査が20秒を超えました。');};
   const eocd=findEndOfCentralDirectory(bytes);
   if(eocd<0||u16(bytes,eocd+4)||u16(bytes,eocd+6)||u16(bytes,eocd+8)!==u16(bytes,eocd+10))fail('INVALID_ARCHIVE','ZIP終端が不正です。');

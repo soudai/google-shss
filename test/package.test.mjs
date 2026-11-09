@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {strToU8} from 'fflate';
 import {inspectZip,decodeBase64,utf8} from '../server/zip.mjs';
-import {renderPackage,canonicalPackageHash,sanitizeHtmlImages} from '../server/package.mjs';
+import {renderPackage,canonicalPackageHash,sanitizeHtml} from '../server/package.mjs';
 import {encodeBase64,utf8Bytes} from '../server/util.mjs';
 import {digest,html,png,zip,zipBase64} from './helpers.mjs';
 
@@ -81,12 +81,20 @@ test('canonicalPackageHash ignores archive order', () => {
   assert.match(canonicalPackageHash(a, digest), /^[0-9a-f]{64}$/);
 });
 
-test('sanitizeHtmlImages rewrites SVG data URLs', () => {
+test('sanitizeHtml rewrites external links for confirmation', () => {
+  const result = sanitizeHtml(html('<a href="https://example.com/x" target="_blank" ping="https://t">x</a>'));
+  assert.match(result.html, /<a href="#" data-shss-external="https:\/\/example.com\/x">x<\/a>/);
+  assert.equal(result.hasSvg, false);
+  const rendered = renderPackage(inspectZip(zip({'index.html': html('<a href="https://example.com/y" download>y</a>')}))).get('index.html');
+  assert.match(rendered, /<a href="#" data-shss-external="https:\/\/example.com\/y">y<\/a>/);
+});
+
+test('sanitizeHtml rewrites SVG data URLs', () => {
   const svg = encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>');
-  const result = sanitizeHtmlImages(html(`<img src="data:image/svg+xml,${svg}"><p style="background:url('data:image/svg+xml,${svg}')">x</p>`));
+  const result = sanitizeHtml(html(`<img src="data:image/svg+xml,${svg}"><p style="background:url('data:image/svg+xml,${svg}')">x</p>`));
   assert.equal(result.hasSvg, true);
   assert.equal((result.html.match(/data:image\/svg\+xml;base64,/g) || []).length, 2);
   const plain = html('<p>no images</p>');
-  assert.deepEqual(sanitizeHtmlImages(plain), {html: plain, hasSvg: false});
-  fails(() => sanitizeHtmlImages(html(`<img src="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')}">`)), 'UNSAFE_SVG');
+  assert.deepEqual(sanitizeHtml(plain), {html: plain, hasSvg: false});
+  fails(() => sanitizeHtml(html(`<img src="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>')}">`)), 'UNSAFE_SVG');
 });

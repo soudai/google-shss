@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {checkHtml} from '../server/html.mjs';
 import {AppError,utf8Size} from '../server/util.mjs';
+import {maxImportBytes} from '../server/limits.mjs';
 import {sanitizeSvg} from '../server/svg.mjs';
 import {validateRaster} from '../server/image.mjs';
 import {html,png} from './helpers.mjs';
@@ -23,7 +24,7 @@ test('checkHtml accepts self-contained HTML', () => {
 test('checkHtml rejects external resources and unsafe elements', () => {
   for (const body of [
     '<iframe></iframe>', '<object></object>', '<form></form>', '<base href="/">',
-    '<img src="https://example.com/a.png">', '<a href="https://example.com">x</a>',
+    '<img src="https://example.com/a.png">', '<a href="http://example.com">x</a>',
     '<script src="data:text/javascript,1"></script>', '<img srcset="a.png 1x">',
     '<style>@import "x.css";</style>', '<p style="background:url(https://x/y.png)">x</p>',
     '<meta http-equiv="refresh" content="0">', '<svg><script>1</script></svg>',
@@ -32,7 +33,15 @@ test('checkHtml rejects external resources and unsafe elements', () => {
   rejects(() => checkHtml('PK\u0003\u0004'), 'UNSUPPORTED');
   rejects(() => checkHtml('<!-- c --><p>x</p>'), 'UNSUPPORTED');
   rejects(() => checkHtml(42), 'UNSUPPORTED');
-  rejects(() => checkHtml(html('x'.repeat(2 * 1024 * 1024))), 'TOO_LARGE');
+  rejects(() => checkHtml(html('x'.repeat(maxImportBytes))), 'TOO_LARGE');
+  assert.equal(checkHtml(html('x'.repeat(3 * 1024 * 1024))).length > 3 * 1024 * 1024, true);
+});
+
+test('checkHtml allows https links only', () => {
+  checkHtml(html('<a href="https://example.com/a?b#c">ok</a><a href=" https://example.com ">ok</a>'));
+  for (const href of ['http://example.com', 'https://user@example.com', 'https://', 'javascript:alert(1)', '//example.com', 'https://exa mple.com'])
+    rejects(() => checkHtml(html(`<a href="${href}">x</a>`)), 'UNSUPPORTED');
+  rejects(() => checkHtml(html('<img src="https://example.com/a.png">')), 'UNSUPPORTED');
 });
 
 test('sanitizeSvg normalizes a safe SVG', () => {

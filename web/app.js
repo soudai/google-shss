@@ -1,4 +1,5 @@
 import {PreviewCache,optimisticComments} from './fast-state.mjs';
+import {maxImportBytes,maxImportMiB} from '../server/limits.mjs';
 import {CommentOutbox,TitleTask,pageKey} from './background.mjs';
 import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs';
 (() => {
@@ -125,7 +126,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     if(!view)$('pages').hidden=true;
     $('import').hidden=!canImport;
   }
-  function dropFrame() {frame?.remove();frame=null;context=null;frameReady=false;messageWindow=0;messageCount=0;clearTimeout(previewTimer);}
+  function dropFrame() {if($('external-dialog').open)$('external-dialog').close();frame?.remove();frame=null;context=null;frameReady=false;messageWindow=0;messageCount=0;clearTimeout(previewTimer);}
   function clean() {
     validating=false;commentNotice='';clearTimeout(prefetchTimer);prefetchQueue=[];$('load-status').textContent='';
     dropFrame();clearTimeout(pollTimer);commentRequest++;revision=null;commentVersion=null;commentEpoch=null;pollDelay=15000;setRegionMode(false);current=null;threads=[];confirmedThreads=[];selected=null;draft=null;filter='open';replyId=null;found=null;
@@ -275,6 +276,17 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     if(draft)items.push({id:'draft',anchor:draft});
     frame.contentWindow.postMessage({...context,type:'annotations',items,selected,focus,regionMode},'*');
   }
+  function confirmExternalLink(value) {
+    const dialog=$('external-dialog');
+    if(dialog.open||typeof value!=='string'||value.length>2048||!/^https:\/\//i.test(value))return;
+    let url;
+    try {url=new URL(value);}catch{return;}
+    if(url.protocol!=='https:'||url.username||url.password)return;
+    $('external-url').textContent=url.href;
+    $('external-open').href=url.href;
+    dialog.showModal();
+  }
+  $('external-open').onclick=()=>$('external-dialog').close();
   // Messages from the preview iframe (web/bridge.js). The frame runs untrusted
   // HTML, so every field is checked before use.
   window.addEventListener('message',e=>{
@@ -286,6 +298,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     try {if(JSON.stringify(p).length>64*1024)return;}catch{return;}
     if(p.type==='ready'&&!frameReady){frameReady=true;clearTimeout(previewTimer);if(!p.highlights)notify('このブラウザでは引用を強調できません。');render();sync();}
     if(!frameReady)return;
+    if(p.type==='external-link'){confirmExternalLink(p.href);return;}
     if(p.type==='page'&&typeof p.targetPath==='string'&&current.pages.includes(p.targetPath)&&typeof p.fragment==='string'&&p.fragment.length<=128){navigatePage(p.targetPath,p.fragment);return;}
     if(p.type==='region-cancel'){setRegionMode(false);sync();return;}
     if(p.type==='blocked')$('comment-status').textContent='HTML内の外部読み込みをブロックしました。';
@@ -523,7 +536,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
         input={};
         if(file){
           if(/\.zip$/i.test(file.name)){
-            if(file.size>5*1024*1024)throw new Error('ZIPは5 MiBまでです。');
+            if(file.size>maxImportBytes)throw new Error('ZIPは'+maxImportMiB+' MiBまでです。');
             const bytes=new Uint8Array(await file.arrayBuffer());let encoded='';
             for(let at=0;at<bytes.length;at+=24576)encoded+=btoa(String.fromCharCode(...bytes.subarray(at,at+24576)));
             input.zipBase64=encoded;session.phase='inspect';importStatus();
@@ -538,7 +551,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
             if(file.size>512*1024)throw new Error('SVGは512 KiBまでです。');
             input.svg=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer());
           }else{
-            if(!/\.html?$/i.test(file.name)||file.size>2*1024*1024)throw new Error('2 MiB以内のHTMLまたは5 MiB以内のZIPを指定してください。');
+            if(!/\.html?$/i.test(file.name)||file.size>maxImportBytes)throw new Error(maxImportMiB+' MiB以内のHTMLまたはZIPを指定してください。');
             input.html=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer());
           }
         }else input.sourceFileId=driveId(link);

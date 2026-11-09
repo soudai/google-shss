@@ -78,6 +78,13 @@
     <form method="dialog" class="dialog-close"><button aria-label="閉じる">×</button></form>
     <h2>共有URL</h2><input id="link" aria-label="共有URL" readonly>
   </dialog>
+  <dialog id="external-dialog" aria-labelledby="external-title">
+    <form method="dialog">
+      <h2 id="external-title">外部リンクを開きますか？</h2>
+      <p id="external-url" dir="ltr"></p>
+      <div class="actions"><button autofocus>キャンセル</button><a id="external-open" target="_blank" rel="noopener noreferrer">別タブで開く</a></div>
+    </form>
+  </dialog>
   <dialog id="delete-dialog" aria-labelledby="delete-title">
     <form method="dialog">
       <h2 id="delete-title">このコメントを削除しますか？</h2>

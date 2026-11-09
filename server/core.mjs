@@ -1,10 +1,10 @@
 import {checkHtml,limits} from './html.mjs';
 import {AppError,fail,utf8Bytes,utf8Size} from './util.mjs';
 import {inspectZip} from './zip.mjs';
-import {renderPackage,sanitizeHtmlImages,canonicalPackageHash} from './package.mjs';
+import {renderPackage,sanitizeHtml,canonicalPackageHash} from './package.mjs';
 import {sanitizeSvg,SVG_POLICY_VERSION} from './svg.mjs';
 import {normalizeAnchor} from '../shared/anchor.mjs';
-export {AppError,SVG_POLICY_VERSION};
+export {AppError,SVG_POLICY_VERSION,limits};
 
 // Storage layout per document (see gas/Code.gs for the Drive implementation):
 //   manifest.json  title, versions and the files of each version
@@ -197,7 +197,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     }
     if ((typeof input.html==='string')===token(input.sourceFileId)) invalid();
     const file=token(input.sourceFileId)?store.readSource(input.sourceFileId):null;
-    const {html,hasSvg}=sanitizeHtmlImages(checkHtml(file?file.text:input.html));
+    const {html,hasSvg}=sanitizeHtml(checkHtml(file?file.text:input.html));
     return {type:'html',html:checkHtml(html),
       ...(hasSvg?{svgPolicyVersion:SVG_POLICY_VERSION}:{}),
       ...(file?{sourceFileId:input.sourceFileId,sourceVersion:file.version}:{})};

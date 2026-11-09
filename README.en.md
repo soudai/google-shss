@@ -22,6 +22,10 @@ Choose **図にコメント** (Comment on a figure). Click an image or chart to 
 
 ![Detail page with a box around the March bar and the corresponding comment in the sidebar](docs/screenshots/region-comment.jpg)
 
+### Open external references
+
+Click an HTTPS link in a document to see the destination. Review the address, then select **別タブで開く** (Open in new tab).
+
 ### Import, navigate, and share
 
 - Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs.
@@ -85,7 +89,7 @@ To update the app, replace the generated files and assign a new version to the e
 ## Data and limits
 
 - Imported documents, version metadata, and comments are stored in your configured Drive folder. Users with edit access to `comments.json` can modify the file directly in Drive. Deleting a comment in the app hides it and retains its text in the JSON file.
-- A single UTF-8 HTML file can be up to 2 MiB and a static SVG up to 512 KiB. ZIP limits are 5 MiB compressed, 20 MiB uncompressed, 100 files, and 20 HTML pages. Importing from a Drive URL or file ID supports single HTML files.
+- A single UTF-8 HTML file can be up to 10 MiB and a static SVG up to 512 KiB. ZIP limits are 10 MiB compressed, 20 MiB uncompressed, 100 files, and 20 HTML pages. Individual files inside ZIPs can be up to 2 MiB (512 KiB for SVGs). Importing from a Drive URL or file ID supports single HTML files.
 - Include images, CSS, and classic JavaScript in the ZIP package. Pages that depend on external CDNs or APIs, ES modules, or form submission are outside the supported scope. HTML JavaScript runs in a sandboxed preview. Import files from authors you trust.
 - Comment bodies are limited to 2,000 characters. New posts are restricted as comment storage or operation history approaches its limits. Back up comment files regularly to a Drive folder accessible only to your administrators.
 

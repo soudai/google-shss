@@ -2,7 +2,10 @@
 // server (server/core.mjs). The server is authoritative; the client uses the
 // same checks to ignore selections the server would reject.
 
-export const ANCHOR_LIMITS = {exact: 500, context: 120, offset: 2 * 1024 * 1024, path: 500, signature: 128};
+import {maxImportBytes} from '../server/limits.mjs';
+
+// A text offset cannot exceed the size of the largest importable HTML.
+export const ANCHOR_LIMITS = {exact: 500, context: 120, offset: maxImportBytes, path: 500, signature: 128};
 export const REGION_TAGS = ['IMG', 'SVG', 'CANVAS', 'FIGURE'];
 // Region paths are produced by pathFor() in web/bridge.js.
 const REGION_PATH = /^body(?:>[a-z][a-z0-9-]*:nth-of-type\([1-9][0-9]*\)){1,20}$/i;
