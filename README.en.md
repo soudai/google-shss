@@ -30,7 +30,7 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 - Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start checking it. If a ZIP has no default start page, select one. You can edit the title during upload and select **閉じる（取り込みは続行）** (Close and keep importing) to return to the library. Select **開く** (Open) in the completion notice to view the document.
 - Switch between pages in a ZIP package using the page menu or links in the document. Comments are saved for each version and page.
-- Use **版** (Versions) to open an earlier version. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
+- Use **版** (Versions) to open an earlier version or choose **新版を取り込む** (Import a new version) to update a document while keeping its previous versions and comments. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
 - Use **プレビューを再読み込み** (Reload preview) to reset the HTML's interactive controls, such as tabs, to their initial state.
 
 Use **保存状況** (Save status) to check progress and retry eligible failures. If SHSS could not confirm the outcome of an import, check the library before selecting the file again to avoid creating a duplicate.
@@ -101,6 +101,12 @@ To update the app, replace the generated files and assign a new version to the e
 
 3. Select the sentence, type a comment, and press **Ctrl+Enter**. When **保存しました** (Saved) appears, reload the page, confirm the comment is there, and delete your own comment.
 4. To test with another account, grant it Viewer access to the document folder in Drive. To let it post, also grant it Editor access to that document's `comments.json`. Copying the web app link does not change Drive permissions.
+
+### Test a ZIP update alongside a comment save
+
+1. Open **版** (Versions) in a test document and choose **新版を取り込む** (Import a new version). Select a ZIP with multiple pages and assets.
+2. While the import is in progress, post a comment on a different test document in another tab. To test with multiple users, post from a second account with permission to comment.
+3. Confirm that the comment shows **保存しました** (Saved) and the ZIP import completes. Open the first page and another page of the new version, then check that the previous version still opens.
 
 ## Data and limits
 
