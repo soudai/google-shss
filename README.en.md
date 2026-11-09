@@ -28,10 +28,12 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 ### Import, navigate, and share
 
-- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs. Closing the dialog does not stop the import; a notice appears when it finishes. **保存状況** (Save status) shows progress and lets you retry a failed import.
+- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start checking it. If a ZIP has no default start page, select one. You can edit the title during upload and select **閉じる（取り込みは続行）** (Close and keep importing) to return to the library. Select **開く** (Open) in the completion notice to view the document.
 - Switch between pages in a ZIP package using the page menu or links in the document. Comments are saved for each version and page.
 - Use **版** (Versions) to open an earlier version. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
 - Use **プレビューを再読み込み** (Reload preview) to reset the HTML's interactive controls, such as tabs, to their initial state.
+
+Use **保存状況** (Save status) to check progress and retry eligible failures. If SHSS could not confirm the outcome of an import, check the library before selecting the file again to avoid creating a duplicate.
 
 ## Requirements
 
@@ -73,7 +75,7 @@ Open http://localhost:8080/ to try the viewer without deploying to Apps Script. 
    | `SHSS_DOMAIN` | The Google Workspace email domain for your users, such as `example.com`. |
 
 4. Create a [new web app deployment](https://developers.google.com/apps-script/guides/web). Set **Execute as** to **User accessing the web app** and limit access to **users in your domain**.
-5. Open the generated `/exec` URL with an account in that domain and grant access to Google Drive, your email address, and external connections when prompted. External connections are used to read several Drive files in parallel; the app connects only to `www.googleapis.com`.
+5. Open the generated `/exec` URL with an account in that domain and review the requested permissions. Parallel Drive reads use the external request scope and target the Drive API at `www.googleapis.com`. If a parallel download fails, SHSS reads the file through the Drive service.
 
 To update the app, replace the generated files and assign a new version to the existing deployment under **Manage deployments**. The existing `/exec` URL will continue to work. When an update adds permissions to the manifest, each user is asked to grant them the next time they open the app.
 
