@@ -190,6 +190,24 @@ test('the write lock covers only shared files, not uploads', () => {
   assert.deepEqual(writes, [['createDocument', true], ['createVersion', true]]);
 });
 
+test('overlapping version uploads both publish to the latest manifest', () => {
+  const {run, store} = service(createService);
+  const first = run('importDocument', {title: 'Concurrent versions', html: html('<p>original</p>')});
+  const createVersion = store.createVersion;
+  let overlapping;
+  store.createVersion = (...args) => {
+    const staged = createVersion(...args);
+    store.createVersion = createVersion;
+    overlapping = run('appendVersion', {documentId: first.documentId, html: html('<p>overlapping</p>')});
+    return staged;
+  };
+  const last = run('appendVersion', {documentId: first.documentId, html: html('<p>staged first</p>')});
+  const doc = run('getDocument', {documentId: first.documentId});
+  assert.deepEqual(doc.versions.map(v => v.versionId), [first.versionId, overlapping.versionId, last.versionId]);
+  assert.equal(doc.versionId, last.versionId);
+  assert.match(run('getDocument', overlapping).html, /overlapping/);
+});
+
 test('imports ZIP packages with multiple pages', () => {
   const {run} = service(createService);
   const zipped = zipBase64({'index.html': html('<a href="two.html">two</a>'), 'two.html': html('<img src="p.png">'), 'p.png': png()});

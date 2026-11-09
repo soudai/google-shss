@@ -8,8 +8,8 @@ const transient=error=>!error?.code||error.code==='INTERNAL'||error.code==='BUSY
 
 // Serialize writes while the UI remains available. Retrying preserves the exact request.
 export class CommentOutbox {
-  constructor(send,{changed=()=>{},saved=()=>{},failed=()=>{},limit=30,retryDelays=[2000,5000],wait=sleep}={}) {
-    Object.assign(this,{send,changed,saved,failed,limit,retryDelays,wait});
+  constructor(send,{changed=()=>{},saved=()=>{},failed=()=>{},limit=30,retryDelays=[2000,5000],wait=sleep,random=Math.random}={}) {
+    Object.assign(this,{send,changed,saved,failed,limit,retryDelays,wait,random});
     this.entries=[];this.running=false;this.snapshots=new Map();
   }
   active(d) {return d?this.entries.filter(e=>e.state!=='failed'&&pageKey(e.request)===pageKey(d)):[];}
@@ -41,7 +41,8 @@ export class CommentOutbox {
         try {result=await this.send(entry.request);break;}
         catch(error){
           if(!transient(error)||attempt>=this.retryDelays.length)throw error;
-          await this.wait(this.retryDelays[attempt]);
+          const delay=this.retryDelays[attempt];
+          await this.wait(error?.code==='BUSY'?delay*(0.5+this.random()):delay);
         }
       }
       if(result.status!=='applied'||result.operationId!==entry.request.operationId||!result.comments)throw new Error('保存結果を確認できません。再試行してください。');

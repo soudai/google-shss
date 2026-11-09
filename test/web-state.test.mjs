@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PreviewCache,optimisticComments} from '../web/fast-state.mjs';
 import {CommentOutbox,TitleTask,pageKey} from '../web/background.mjs';
+import {createCaller} from '../web/rpc.mjs';
 
 const doc = (extra = {}) => ({documentId: 'd', versionId: 'v', pagePath: 'index.html', pageHash: 'h', html: '<p>x</p>', comments: {threads: []}, ...extra});
 
@@ -19,14 +20,15 @@ test('PreviewCache reuses HTML when the server reports it unchanged', async () =
   assert.equal(second.htmlUnchanged, undefined);
 });
 
-test('PreviewCache expires, evicts and hides stale comments', () => {
+test('PreviewCache expires, evicts and marks older comments provisional', () => {
   let now = 0;
   const cache = new PreviewCache(null, {now: () => now, maxEntries: 2});
   for (const versionId of ['a', 'b', 'c']) cache.remember({documentId: 'd', versionId}, doc({versionId}));
   assert.equal(cache.peek({documentId: 'd', versionId: 'a'}), null);
   assert.ok(cache.peek({documentId: 'd', versionId: 'c'}).comments);
   now = 31000;
-  assert.equal(cache.peek({documentId: 'd', versionId: 'c'}).comments, null);
+  assert.equal(cache.peek({documentId: 'd', versionId: 'c'}).commentsStale, true);
+  assert.deepEqual(cache.peek({documentId: 'd', versionId: 'c'}).comments, {threads: []});
   now = 301000;
   assert.equal(cache.peek({documentId: 'd', versionId: 'c'}), null);
 });
@@ -109,6 +111,25 @@ test('CommentOutbox resends momentary failures with the same operationId', async
   const entry = rejected.enqueue({...request, operationId: 'o2'}, {});
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(entry.state, 'failed');
+});
+
+test('a busy comment gets one retry budget across the RPC and outbox', async () => {
+  const sent = [], waits = [];
+  const call = createCaller(async (action, input) => {
+    assert.equal(action, 'submitOperation');
+    sent.push(input.operationId);
+    return {ok: false, error: {code: 'BUSY', message: 'busy', retryable: true}};
+  }, {wait: async () => assert.fail('the RPC must not retry comments')});
+  const outbox = new CommentOutbox(request => call('submitOperation', request), {
+    random: () => 0.75, wait: async ms => {waits.push(ms);}
+  });
+  const entry = outbox.enqueue({documentId: 'd', versionId: 'v', sourceHash: 's',
+    operationId: 'o1', type: 'add', payload: {body: 'x'}}, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(sent, ['o1', 'o1', 'o1']);
+  assert.deepEqual(waits, [2500, 6250]);
+  assert.equal(entry.state, 'failed');
+  assert.equal(entry.error.code, 'BUSY');
 });
 
 test('TitleTask coalesces renames', async () => {

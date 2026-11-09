@@ -132,15 +132,18 @@ test('createCaller resends BUSY replies with jittered backoff', async () => {
   const busy = {ok: false, error: {code: 'BUSY', message: 'm', retryable: true}};
   const options = {busyDelays: [100, 200], random: () => 0.5, wait: async ms => {waits.push(ms);}};
   const call = createCaller(async () => ++calls < 3 ? busy : {ok: true, value: calls}, options);
-  assert.equal(await call('x'), 3);
+  assert.equal(await call('manageDocument'), 3);
   assert.deepEqual(waits, [100, 200]);
   // Gives up after the last delay; other errors are not resent.
   calls = 0;
   const always = createCaller(async () => {calls++; return busy;}, options);
-  await assert.rejects(always('x'), e => e.code === 'BUSY');
+  await assert.rejects(always('manageDocument'), e => e.code === 'BUSY');
   assert.equal(calls, 3);
   calls = 0;
+  await assert.rejects(always('appendVersion'), e => e.code === 'BUSY');
+  assert.equal(calls, 1, 'never resends a version upload automatically');
+  calls = 0;
   const denied = createCaller(async () => {calls++; return {ok: false, error: {code: 'FORBIDDEN', message: 'no'}};}, options);
-  await assert.rejects(denied('x'), e => e.code === 'FORBIDDEN');
+  await assert.rejects(denied('manageDocument'), e => e.code === 'FORBIDDEN');
   assert.equal(calls, 1);
 });

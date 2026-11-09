@@ -35,6 +35,12 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 Use **保存状況** (Save status) to check progress and retry eligible failures. If SHSS could not confirm the outcome of an import, check the library before selecting the file again to avoid creating a duplicate.
 
+### Display and save responsiveness
+
+Previously fetched pages display from the current tab's memory cache. When recent comment data is available, you can post a new comment while the page is being revalidated. Confirmed comments also appear immediately when you return to a page. Failed posts restore your input and can be retried through **保存状況** (Save status). Keep the tab open until saving completes.
+
+Large preview HTML is transferred with gzip compression. Drive reads are grouped, and comment saves check current permissions, the file version and checksum inside the write lock before reusing cached JSON. Initial loads and confirmed saves still depend on Apps Script, Drive and network latency; completion within one second is not guaranteed.
+
 ## Requirements
 
 - A Google Workspace account with access to Apps Script and Google Drive
@@ -101,7 +107,7 @@ To update the app, replace the generated files and assign a new version to the e
 - Imported documents, version metadata, and comments are stored in your configured Drive folder. Users with edit access to `comments.json` can modify the file directly in Drive. Deleting a comment in the app hides it and retains its text in the JSON file.
 - A single UTF-8 HTML file can be up to 10 MiB and a static SVG up to 512 KiB. ZIP limits are 10 MiB compressed, 20 MiB uncompressed, 100 files, and 20 HTML pages. Individual files inside ZIPs can be up to 2 MiB (512 KiB for SVGs). Importing from a Drive URL or file ID supports single HTML files.
 - Include images, CSS, and classic JavaScript in the ZIP package. Pages that depend on external CDNs or APIs, ES modules, or form submission are outside the supported scope. HTML JavaScript runs in a sandboxed preview. Import files from authors you trust.
-- Any number of people can view documents at the same time. Writes to shared files, such as comment posts and new versions, are processed one at a time, and SHSS resends them automatically when the server is busy. SHSS is designed for small teams working at the same time.
+- Viewing documents does not take the write lock. New imports from local files and the creation of files for a new version also run outside the lock. Updates to shared data, such as comments and version metadata, run one at a time. If the server is busy, SHSS retries comments up to twice with the same operation ID. If a version upload hits a busy server, you can retry it from Save status.
 - Comment bodies are limited to 2,000 characters. New posts are restricted as comment storage or operation history approaches its limits. Back up comment files regularly to a Drive folder accessible only to your administrators.
 
 ## License

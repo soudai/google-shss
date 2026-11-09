@@ -388,6 +388,9 @@ export function createService({store, identity, digest, uuid, now, locked}) {
         return locked(()=>{
           const d=document(input.documentId);
           checkAppend(d);
+          if(d.manifest.versionsFolderId!==prior.manifest.versionsFolderId) {
+            fail('VERSION_MISMATCH','版の保存先が変更されました。文書を開き直してください。');
+          }
           committing=true;
           return commitVersion(d,selected,v);
         });
@@ -404,7 +407,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
         if(!file?.canEdit) denied();
         verifyHtml(ref);
         if(op.sourceHash!==v.sourceHash) fail('VERSION_MISMATCH','開いている版を再読み込みしてください。');
-        const s=state(d,file),requestHash=digest(JSON.stringify(op));
+        const s=state(d,file,true),requestHash=digest(JSON.stringify(op));
         if(s.epoch!==undefined&&op.epoch!==s.epoch)fail('VERSION_MISMATCH','コメントが復旧されています。再読み込みしてください。');
         const seen=s.appliedOperations.find(o=>o.operationId===op.operationId);
         if(seen) {

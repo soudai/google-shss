@@ -1,6 +1,9 @@
 // Calls the Apps Script rpc() entry point (gas/Code.gs) and turns its
 // {ok, value} / {ok:false, error} replies into return values and exceptions.
 
+import {gunzipText} from '../server/gzip.mjs';
+import {maxImportBytes} from '../server/limits.mjs';
+
 const NETWORK_ERROR = '通信に失敗しました。再試行してください。';
 
 export function scriptRunApi(run) {
@@ -9,25 +12,31 @@ export function scriptRunApi(run) {
   });
 }
 
-// Waits before resending a request the server rejected as BUSY. The jitter keeps
-// several users who collided from colliding again.
-export const BUSY_DELAYS = [1000, 2000, 4000, 8000];
+const BUSY_DELAYS = [1000, 2000];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-// Errors carry the server's code and retryable flag. A missing code means the
-// request may not have reached the server, or its outcome is unknown.
-// BUSY means the server could not take the write lock and changed nothing, so
-// the same request is resent automatically.
+// Comments retry through their outbox. Appending a version stages files before
+// trying the lock, so its upload stays in the import queue for manual retry.
 export function createCaller(api, {busyDelays = BUSY_DELAYS, wait = sleep, random = Math.random} = {}) {
   return async function call(action, input = {}) {
+    const request = action === 'getDocument' ? {...input, acceptHtmlGzip: true} : input;
+    const retryBusy = action === 'manageDocument' || action === 'importDocument';
     for (let attempt = 0; ; attempt++) {
       let reply;
-      try {reply = await api(action, input);} catch {throw new Error(NETWORK_ERROR);}
-      if (reply?.ok) return reply.value;
-      if (reply?.error?.code === 'BUSY' && attempt < busyDelays.length) {
+      try {reply = await api(action, request);} catch {throw new Error(NETWORK_ERROR);}
+      if (reply?.ok) {
+        if (action === 'getDocument' && reply.value?.htmlGzip !== undefined) {
+          const {htmlGzip, ...value} = reply.value;
+          const html = gunzipText(htmlGzip, maxImportBytes, () => {throw new Error('プレビューが上限を超えています。');});
+          return {...value, html};
+        }
+        return reply.value;
+      }
+      if (retryBusy && reply?.error?.code === 'BUSY' && attempt < busyDelays.length) {
         await wait(busyDelays[attempt] * (0.5 + random()));
         continue;
       }
+      // An absent error code can indicate an unknown write outcome.
       throw Object.assign(new Error(reply?.error?.message || '通信に失敗しました。'), reply?.error);
     }
   };
