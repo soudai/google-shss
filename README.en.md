@@ -4,11 +4,30 @@
 
 Google SHSS is a Google Apps Script web app for reviewing HTML reports and figures within a Google Workspace domain. It stores document versions and comments in Google Drive and provides links that open a specific version.
 
-- Import HTML, multi-page ZIP packages, and static SVG files.
-- Select text or drag around part of an image or chart to leave a comment.
-- Post comments and replies with **Ctrl+Enter**. Comments belong to a specific version and page.
-
 The app interface is in Japanese.
+
+## Screenshots and features
+
+These screenshots show the app running locally with a fictional sales report.
+
+### Comment on text
+
+Select text in the preview to open the comment field on the right. Press **Ctrl+Enter** or click **投稿** (Post) to submit. Click a quoted passage in the sidebar to highlight it in the preview. You can reply to threads and delete your own posts.
+
+![Report overview with a highlighted sentence and its comment thread and reply in the sidebar](docs/screenshots/text-comment.jpg)
+
+### Comment on part of a figure
+
+Choose **図にコメント** (Comment on a figure). Click an image or chart to select the whole figure, or drag to outline a smaller area. The screenshot shows a saved comment attached to the March bar.
+
+![Detail page with a box around the March bar and the corresponding comment in the sidebar](docs/screenshots/region-comment.jpg)
+
+### Import, navigate, and share
+
+- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs.
+- Switch between pages in a ZIP package using the page menu or links in the document. Comments are saved for each version and page.
+- Use **版** (Versions) to open an earlier version. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
+- Use **プレビューを再読み込み** (Reload preview) to reset the HTML's interactive controls, such as tabs, to their initial state.
 
 ## Requirements
 
