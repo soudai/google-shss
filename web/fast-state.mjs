@@ -1,6 +1,8 @@
 // Only this tab owns these bytes. Never persist document or comment bodies.
+// maxBytes is an estimate (two bytes per character) and must hold a page from
+// the largest import (10 MiB), or reopening it would download it again.
 export class PreviewCache {
-  constructor(load,{now=Date.now,ttl=300000,maxEntries=4,maxBytes=8*1024*1024}={}) {
+  constructor(load,{now=Date.now,ttl=300000,maxEntries=4,maxBytes=64*1024*1024}={}) {
     Object.assign(this,{load,now,ttl,maxEntries,maxBytes});
     this.entries=new Map();this.requests=new Map();this.epoch=0;
   }
@@ -55,6 +57,16 @@ export class PreviewCache {
   clearComments(documentId) {
     this.epoch++;this.requests.clear();
     for(const entry of this.entries.values())if(entry.value.documentId===documentId){
+      entry.value.comments=null;entry.value.commentsError={message:'コメントを更新中…'};
+    }
+  }
+  // Keeps the pages but treats everything else as out of date: comments are
+  // dropped and requests in flight will not be stored. request() always asks
+  // the server, sending the cached page hash, so an unchanged page is not sent
+  // again while anything newer replaces the cached copy.
+  markStale() {
+    this.epoch++;this.requests.clear();
+    for(const entry of this.entries.values()){
       entry.value.comments=null;entry.value.commentsError={message:'コメントを更新中…'};
     }
   }

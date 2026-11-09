@@ -1,3 +1,30 @@
+// Apps Script entry points and the Drive-backed store for SHSSCore (server/core.mjs).
+// The build prepends the SHSSCore bundle to this file. Functions ending in "_"
+// cannot be called through google.script.run.
+
+const FOLDER_MIME_='application/vnd.google-apps.folder';
+const MAX_JSON_BYTES_=1024*1024;
+const LOCK_TIMEOUT_MS_=7000;
+// CacheService values are limited to 100 KB.
+const CACHE_MAX_BYTES_=80000;
+// Largest file downloaded in parallel; UrlFetchApp responses are limited to 50 MB.
+const PARALLEL_MAX_BYTES_=10*1024*1024;
+
+function isDriveId_(id) {return typeof id==='string'&&/^[\w-]{1,128}$/.test(id);}
+
+// Apps Script blobs take signed bytes (-128..127).
+function toSignedBytes_(bytes) {return Array.from(bytes,b=>b>127?b-256:b);}
+
+function timestamp_() {return new Date().toISOString().replace(/[:.]/g,'-');}
+
+// Runs fn while holding the script-wide lock that serializes all writes.
+function withScriptLock_(fn, busy) {
+  const lock=LockService.getScriptLock();
+  if(!lock.tryLock(LOCK_TIMEOUT_MS_))throw busy();
+  try {return fn();}
+  finally {lock.releaseLock();}
+}
+
 function doGet(e) {
   const config = configuration_();
   const template = HtmlService.createTemplateFromFile('Index');
@@ -15,14 +42,11 @@ function rpc(action, input) {
     const run = SHSSCore.createService({
       store, identity: () => identity_(config.domain),
       uuid: () => Utilities.getUuid(), now: () => new Date().toISOString(), digest: digest_,
-      locked: fn => {
-        const lock=LockService.getScriptLock();
-        if(!lock.tryLock(7000)) throw new SHSSCore.AppError('BUSY','保存が混み合っています。再試行してください。',true);
-        try {
-          store.clearMetadata();
-          return fn();
-        } finally {lock.releaseLock();}
-      }
+      // Metadata read before the lock may be stale; re-read it inside.
+      locked: fn => withScriptLock_(() => {
+        store.clearMetadata();
+        return fn();
+      }, () => new SHSSCore.AppError('BUSY','保存が混み合っています。再試行してください。',true))
     });
     return {ok:true,value:run(action,input)};
   } catch(error) {
@@ -36,7 +60,7 @@ function configuration_() {
   const props=PropertiesService.getScriptProperties();
   const root=props.getProperty('SHSS_ROOT_FOLDER_ID')||'';
   const domain=(props.getProperty('SHSS_DOMAIN')||'').trim().toLowerCase();
-  if(!/^[\w-]{1,128}$/.test(root)||!domain) throw new SHSSCore.AppError('CONFIG','管理フォルダとドメインを設定してください。');
+  if(!isDriveId_(root)||!domain) throw new SHSSCore.AppError('CONFIG','管理フォルダとドメインを設定してください。');
   return {root,domain};
 }
 
@@ -55,7 +79,7 @@ function identity_(domain) {
     const cached=cache.get('drive-user:'+email);
     if(cached) {
       const actor=JSON.parse(cached);
-      if(actor.email===email&&typeof actor.id==='string'&&/^[\w-]{1,128}$/.test(actor.id)&&typeof actor.displayName==='string'&&actor.displayName.length<=160)return {id:actor.id,displayName:actor.displayName};
+      if(actor.email===email&&isDriveId_(actor.id)&&typeof actor.displayName==='string'&&actor.displayName.length<=160)return {id:actor.id,displayName:actor.displayName};
     }
   }catch(e){console.warn('Identity cache unavailable');}
   const user=Drive.About.get({fields:'user(permissionId,displayName,emailAddress)'}).user;
@@ -66,17 +90,23 @@ function identity_(domain) {
 }
 
 function hex_(bytes) {return bytes.map(b=>((b+256)%256).toString(16).padStart(2,'0')).join('');}
-function digest_(text) {return hex_(typeof text==='string'?Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,text,Utilities.Charset.UTF_8):Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,Array.from(text,b=>b>127?b-256:b)));}
+// SHA-256 hex of a string (as UTF-8) or of a byte array.
+function digest_(text) {return hex_(typeof text==='string'?Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,text,Utilities.Charset.UTF_8):Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,toSignedBytes_(text)));}
 
+// Each document is a folder under root, tagged with appProperties.shss='document':
+//   manifest.json, comments.json, versions/<versionId>/{index.html | page-N.html, source-N}
+// Every lookup checks the parent folder, name and MIME type, so an ID taken from
+// a manifest cannot point outside its document.
 function driveStore_(root) {
-  const folder='application/vnd.google-apps.folder';
+  const folder=FOLDER_MIME_;
   const fields='id,name,mimeType,parents,trashed,size,version,sha256Checksum,appProperties,capabilities(canDownload,canEdit,canModifyContent,canAddChildren)';
   const metadata=new Map(), preparedDocuments=new Set();
   const fail=(code,message)=>{throw new SHSSCore.AppError(code,message);};
   const notFound=()=>fail('NOT_FOUND','文書または版が見つかりません。');
   const forbidden=()=>fail('FORBIDDEN','この操作に必要なDrive権限がありません。');
   const unavailable=error=>/file not found|insufficient (?:file )?permissions|access denied|permission denied|not authorized|do not have permission|forbidden|\b(?:403|404)\b/i.test(String(error.message||error));
-  const idOk=id=>typeof id==='string'&&/^[\w-]{1,128}$/.test(id);
+  const idOk=isDriveId_;
+  // Metadata is cached per request; clearMetadata() resets it inside the lock.
   function meta(id) {
     if(!idOk(id))return null;
     if(metadata.has(id))return metadata.get(id);
@@ -110,23 +140,89 @@ function driveStore_(root) {
     const parents=pending.map(id=>"'"+id+"' in parents").join(' or ');
     prefetch(["("+parents+") and (name = 'manifest.json' or name = 'comments.json' or name = 'versions')"]);
   }
-  function blobText(file, max) {
+  const sha256Hex=bytes=>hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
+  // Contents fetched in parallel by preloadFiles, by file ID. Each is used once.
+  const downloads=new Map();
+  // Returns {text, sha256} where sha256 is the hash of the bytes as stored.
+  function download(file, max) {
     if(!file?.capabilities?.canDownload)forbidden();
     if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+    const ready=downloads.get(file.id);
+    if(ready&&ready.version===file.version) {
+      downloads.delete(file.id);
+      if(ready.size>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+      return ready;
+    }
     let blob;
     try {blob=DriveApp.getFileById(file.id).getBlob();}catch(e){if(unavailable(e))forbidden();throw e;}
     const bytes=blob.getBytes();
     if(bytes.length>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    const text=blob.getDataAsString('UTF-8');
-    if(hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes))!==digest_(text))fail('INVALID_DATA','UTF-8のファイルを指定してください。');
+    return {text:blob.getDataAsString('UTF-8'),sha256:sha256Hex(bytes)};
+  }
+  // Reads a file as strict UTF-8: the bytes must hash the same as the decoded text re-encoded.
+  function blobText(file, max) {
+    const {text,sha256}=download(file,max);
+    if(sha256!==digest_(text))fail('INVALID_DATA','UTF-8のファイルを指定してください。');
     return text;
   }
+  // Reads a stored page and returns the SHA-256 of its bytes. Pages were written
+  // by this app from valid strings, so when the hash matches the recorded page
+  // hash, the bytes are known to be valid UTF-8 and need no second check.
+  function blobTextWithHash(file, max) {
+    const {text,sha256}=download(file,max);
+    return {text,sha256};
+  }
+  const cacheable=file=>!!file?.version&&Number(file.size)<=CACHE_MAX_BYTES_&&file.capabilities?.canDownload===true;
+  const cacheKey=file=>'file-text:'+digest_(file.id+':'+file.version);
+  // Texts loaded in bulk from the user cache by preloadFiles, keyed like the cache.
+  const cachedTexts=new Map();
+  // Loads several files at once: cached texts in one CacheService call, and the
+  // rest downloaded in parallel. Later reads use the results. This is only an
+  // optimization; anything not loaded here is read one by one as before, which
+  // also reports any error.
+  function preloadFiles(files) {
+    const unique=[...new Map(files.filter(f=>idOk(f?.id)).map(f=>[f.id,f])).values()];
+    const keys=[...new Set(unique.filter(cacheable).map(cacheKey))].filter(key=>!cachedTexts.has(key));
+    if(keys.length) {
+      try {
+        const found=CacheService.getUserCache().getAll(keys);
+        for(const key of Object.keys(found))cachedTexts.set(key,found[key]);
+      }catch(e){console.warn('File cache unavailable');}
+    }
+    const pending=unique.filter(f=>f.capabilities?.canDownload===true&&Number(f.size)<=PARALLEL_MAX_BYTES_
+      &&/^[a-f0-9]{64}$/i.test(f.sha256Checksum||'')
+      &&!downloads.has(f.id)&&!(cacheable(f)&&cachedTexts.has(cacheKey(f))));
+    // One file gains nothing from a parallel request.
+    if(pending.length<2)return;
+    let responses;
+    try {
+      const authorization='Bearer '+ScriptApp.getOAuthToken();
+      responses=UrlFetchApp.fetchAll(pending.map(f=>({
+        url:'https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(f.id)+'?alt=media&supportsAllDrives=true',
+        headers:{Authorization:authorization},muteHttpExceptions:true,followRedirects:false
+      })));
+    }catch(e){console.warn('Parallel download unavailable');return;}
+    responses.forEach((response,i)=>{
+      const file=pending[i];
+      try {
+        if(response.getResponseCode()!==200)return;
+        const bytes=response.getContent();
+        if(bytes.length!==Number(file.size))return;
+        const sha256=sha256Hex(bytes);
+        // The version used for caching must match the downloaded bytes.
+        if(file.sha256Checksum.toLowerCase()!==sha256)return;
+        downloads.set(file.id,{version:file.version,size:bytes.length,sha256,text:response.getContentText('UTF-8')});
+      }catch(e){console.warn('Parallel response unavailable');}
+    });
+  }
+  // Small files are cached per user for 5 minutes, keyed by Drive file version.
   function readCachedText(file,max) {
     if(!file?.capabilities?.canDownload)forbidden();
     if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    if(!file.version || !(Number(file.size)<=80000)) return blobText(file,max);
+    if(!cacheable(file)) return blobText(file,max);
     let cache;
-    const key='file-text:'+digest_(file.id+':'+file.version);
+    const key=cacheKey(file);
+    if(cachedTexts.has(key))return cachedTexts.get(key);
     try {
       cache=CacheService.getUserCache();
       const cached=cache.get(key);
@@ -149,7 +245,8 @@ function driveStore_(root) {
   }
   function canAdd(id) {const f=meta(id);return f?.mimeType===folder && f.capabilities?.canAddChildren===true;}
   return {
-    clearMetadata() {metadata.clear();preparedDocuments.clear();},
+    clearMetadata() {metadata.clear();preparedDocuments.clear();cachedTexts.clear();downloads.clear();},
+    preloadFiles,
     prefetchVersions(refs) {
       const clauses=new Set();
       for(const {versionsFolderId,v,page} of refs){
@@ -179,6 +276,12 @@ function driveStore_(root) {
       const ids=files.map(f=>f.id);
       for(const file of files)metadata.set(file.id,file);
       prepareDocuments(ids);
+      // Manifest metadata came from the prefetch above; no extra Drive calls here.
+      preloadFiles(files.flatMap(f=>{
+        const manifest=metadata.get(f.appProperties?.manifest);
+        return child(manifest,f.id,'application/json')&&manifest.name==='manifest.json'
+          &&Number(manifest.size)<=MAX_JSON_BYTES_?[manifest]:[];
+      }));
       return {ids,cursor:page.nextPageToken||null};
     },
     findDocument(id) {
@@ -187,7 +290,7 @@ function driveStore_(root) {
       prepareDocuments([id]);
       const manifest=meta(f.appProperties.manifest);
       if(!child(manifest,id,'application/json')||manifest.name!=='manifest.json'||!manifest.capabilities?.canDownload)return null;
-      return {manifestId:manifest.id,manifestCanEdit:writable(manifest),manifestText:readCachedText(manifest,1024*1024)};
+      return {manifestId:manifest.id,manifestCanEdit:writable(manifest),manifestText:readCachedText(manifest,MAX_JSON_BYTES_)};
     },
     htmlFile(docId, versionsId, version) {
       if(!child(meta(versionsId),docId,folder)||!child(meta(version.folderId),versionsId,folder))notFound();
@@ -201,12 +304,14 @@ function driveStore_(root) {
       if(!child(f,version.folderId,'text/html')||f.name!==`page-${index}.html`||f.appProperties?.shssPagePath!==page.path||!f.capabilities?.canDownload)notFound();
       return f;
     },
-    readHtml: f=>readCachedText(f,SHSSCore.limits.html),
+    // Small pages come from the cache as text; core hashes them. Large pages are
+    // read once and returned with the hash of their bytes.
+    readHtml: f=>cacheable(f)?readCachedText(f,SHSSCore.limits.html):blobTextWithHash(f,SHSSCore.limits.html),
     commentsFile(docId,id) {
       const f=meta(id);
       return child(f,docId,'application/json')&&f.name==='comments.json'&&f.capabilities?.canDownload ? {id,canEdit:writable(f),meta:f} : null;
     },
-    readComments: (f,{cached=false}={})=>cached?readCachedText(f.meta,1024*1024):blobText(f.meta,1024*1024),
+    readComments: (f,{cached=false}={})=>cached?readCachedText(f.meta,MAX_JSON_BYTES_):blobText(f.meta,MAX_JSON_BYTES_),
     writeComments: (f,text)=>write(f.id,'application/json',text)?.version,
     readSource(id) {
       const f=meta(id);
@@ -240,7 +345,7 @@ function driveStore_(root) {
       const folderId=create(parent,versionId,folder),files=[],pages=[];
       let index=0;
       for(const [path,file] of pkg.files) {
-        const name=`source-${index++}`,blob=Utilities.newBlob(Array.from(file.bytes,b=>b>127?b-256:b),file.mime,name);
+        const name=`source-${index++}`,blob=Utilities.newBlob(toSignedBytes_(file.bytes),file.mime,name);
         const fileId=Drive.Files.create({name,mimeType:file.mime,parents:[folderId],appProperties:{shssPath:path,shssType:'source'}},blob,{fields:'id',supportsAllDrives:true}).id;
         files.push({path,fileId,mime:file.mime,size:file.bytes.length,sourceHash:digest(file.bytes)});
       }
@@ -257,11 +362,12 @@ function driveStore_(root) {
 // Run from the Apps Script editor as the storage administrator. The trailing
 // underscore keeps these maintenance functions unavailable to google.script.run.
 function backupAllComments_() {
+  const BACKUPS_PER_DOCUMENT=10;
   const config=configuration_(),props=PropertiesService.getScriptProperties();
   const backupRoot=props.getProperty('SHSS_BACKUP_FOLDER_ID')||'';
-  if(!/^[\w-]{1,128}$/.test(backupRoot)||backupRoot===config.root)throw new Error('SHSS_BACKUP_FOLDER_IDに別の非公開フォルダを設定してください。');
+  if(!isDriveId_(backupRoot)||backupRoot===config.root)throw new Error('SHSS_BACKUP_FOLDER_IDに別の非公開フォルダを設定してください。');
   const root=Drive.Files.get(backupRoot,{fields:'id,mimeType,capabilities(canAddChildren)',supportsAllDrives:true});
-  if(root.mimeType!=='application/vnd.google-apps.folder'||root.capabilities?.canAddChildren!==true)throw new Error('バックアップフォルダに追加できません。');
+  if(root.mimeType!==FOLDER_MIME_||root.capabilities?.canAddChildren!==true)throw new Error('バックアップフォルダに追加できません。');
   const store=driveStore_(config.root);let cursor=null,count=0;
   do {
     const page=store.listDocuments(cursor);
@@ -269,19 +375,18 @@ function backupAllComments_() {
       const record=store.findDocument(id);if(!record)continue;
       const manifest=JSON.parse(record.manifestText),file=store.commentsFile(id,manifest.commentsFileId);
       if(!file)continue;
-      const lock=LockService.getScriptLock();
-      if(!lock.tryLock(7000))throw new Error('保存処理中です。再試行してください。');
-      try {
+      withScriptLock_(()=>{
         const raw=store.readComments(file),state=SHSSCore.validateComments(JSON.parse(raw),id);
-        const name=`comments-${id}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+        const name=`comments-${id}-${timestamp_()}.json`;
         Drive.Files.create({name,mimeType:'application/json',parents:[backupRoot],appProperties:{shssBackupDocumentId:id,shssBackupRevision:String(state.revision)}},Utilities.newBlob(raw,'application/json',name),{fields:'id',supportsAllDrives:true});
-      }finally{lock.releaseLock();}
+      },()=>new Error('保存処理中です。再試行してください。'));
+      // Keep the newest BACKUPS_PER_DOCUMENT backups of each document.
       const backups=[];let next=null;
       do {
         const page=Drive.Files.list({q:`'${backupRoot}' in parents and trashed = false and appProperties has { key='shssBackupDocumentId' and value='${id}' }`,fields:'files(id,createdTime),nextPageToken',pageSize:100,pageToken:next,orderBy:'createdTime desc',supportsAllDrives:true,includeItemsFromAllDrives:true});
         backups.push(...(page.files||[]));next=page.nextPageToken||null;
       }while(next);
-      for(const old of backups.slice(10))Drive.Files.update({trashed:true},old.id,null,{fields:'id',supportsAllDrives:true});
+      for(const old of backups.slice(BACKUPS_PER_DOCUMENT))Drive.Files.update({trashed:true},old.id,null,{fields:'id',supportsAllDrives:true});
       count++;
     }
     cursor=page.cursor;
@@ -294,29 +399,29 @@ function restoreCommentsFromBackup_() {
   const docId=props.getProperty('SHSS_RESTORE_DOCUMENT_ID')||'';
   const backupId=props.getProperty('SHSS_RESTORE_BACKUP_ID')||'';
   const backupRoot=props.getProperty('SHSS_BACKUP_FOLDER_ID')||'';
-  if(![docId,backupId,backupRoot].every(id=>/^[\w-]{1,128}$/.test(id))||backupRoot===config.root)throw new Error('復旧対象IDと別のバックアップフォルダIDを設定してください。');
+  if(![docId,backupId,backupRoot].every(isDriveId_)||backupRoot===config.root)throw new Error('復旧対象IDと別のバックアップフォルダIDを設定してください。');
   const backup=Drive.Files.get(backupId,{fields:'id,mimeType,parents,appProperties,size,capabilities(canDownload)',supportsAllDrives:true});
   if(backup.mimeType!=='application/json'||!backup.parents?.includes(backupRoot)||backup.appProperties?.shssBackupDocumentId!==docId||!backup.capabilities?.canDownload)throw new Error('この文書のバックアップではありません。');
   const store=driveStore_(config.root),record=store.findDocument(docId);
   if(!record)throw new Error('文書を読み取れません。');
   const manifest=JSON.parse(record.manifestText),file=store.commentsFile(docId,manifest.commentsFileId);
   if(!file?.canEdit)throw new Error('コメントファイルの編集権限がありません。');
-  if(Number(backup.size)>1024*1024)throw new Error('バックアップが上限を超えています。');
+  if(Number(backup.size)>MAX_JSON_BYTES_)throw new Error('バックアップが上限を超えています。');
   const raw=DriveApp.getFileById(backupId).getBlob().getDataAsString('UTF-8');
   const restored=SHSSCore.validateComments(JSON.parse(raw),docId);
-  const lock=LockService.getScriptLock();
-  if(!lock.tryLock(7000))throw new Error('保存処理中です。再試行してください。');
-  try {
+  withScriptLock_(()=>{
+    // A higher revision and a new epoch make open clients reload instead of
+    // overwriting the restored comments with stale operations.
     let currentRevision=0;
     try {currentRevision=SHSSCore.validateComments(JSON.parse(store.readComments(file)),docId).revision;}catch(e){console.warn('Current comments cannot be parsed; restoring backup');}
     restored.revision=Math.max(currentRevision,restored.revision)+1;
     restored.epoch=Utilities.getUuid();
     const serialized=JSON.stringify(restored);
-    if(Utilities.newBlob(serialized).getBytes().length>1024*1024)throw new Error('復旧後のJSONが上限を超えています。');
+    if(Utilities.newBlob(serialized).getBytes().length>MAX_JSON_BYTES_)throw new Error('復旧後のJSONが上限を超えています。');
     const before=DriveApp.getFileById(file.id).getBlob();
-    const beforeName=`pre-restore-${docId}-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+    const beforeName=`pre-restore-${docId}-${timestamp_()}.json`;
     Drive.Files.create({name:beforeName,mimeType:'application/json',parents:[backupRoot],appProperties:{shssPreRestoreDocumentId:docId}},before,{fields:'id',supportsAllDrives:true});
     store.writeComments(file,serialized);
-  }finally{lock.releaseLock();}
+  },()=>new Error('保存処理中です。再試行してください。'));
   console.log(`Restored ${docId} from ${backupId} at revision ${restored.revision}`);
 }

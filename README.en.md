@@ -28,7 +28,7 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 ### Import, navigate, and share
 
-- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs.
+- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs. Closing the dialog does not stop the import; a notice appears when it finishes. **保存状況** (Save status) shows progress and lets you retry a failed import.
 - Switch between pages in a ZIP package using the page menu or links in the document. Comments are saved for each version and page.
 - Use **版** (Versions) to open an earlier version. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
 - Use **プレビューを再読み込み** (Reload preview) to reset the HTML's interactive controls, such as tabs, to their initial state.
@@ -51,6 +51,16 @@ node --check < dist/gas/Code.gs
 
 The build produces `Code.gs`, `Index.html`, and `appsscript.json` in `dist/gas/`.
 
+`npm test` runs the tests for import sanitization, comment handling, Drive reads and the viewer UI. `npm run check` runs the tests, the build and the syntax check together.
+
+### Run locally
+
+```sh
+npm run dev
+```
+
+Open http://localhost:8080/ to try the viewer without deploying to Apps Script. Documents are stored in memory instead of Google Drive and are lost when the server stops. Changes under `web/` appear when you reload the page; changes under `server/` and `scripts/` restart the server automatically. To simulate a slow network, add a delay in milliseconds to every request, for example `SHSS_DEV_DELAY=800 npm run dev`.
+
 ## Deploy to Apps Script
 
 1. Create a standalone project in [Apps Script](https://script.google.com/). Enable manifest visibility in Project Settings and add the three generated files. Name the HTML file `Index` in the editor.
@@ -63,9 +73,9 @@ The build produces `Code.gs`, `Index.html`, and `appsscript.json` in `dist/gas/`
    | `SHSS_DOMAIN` | The Google Workspace email domain for your users, such as `example.com`. |
 
 4. Create a [new web app deployment](https://developers.google.com/apps-script/guides/web). Set **Execute as** to **User accessing the web app** and limit access to **users in your domain**.
-5. Open the generated `/exec` URL with an account in that domain and grant access to Google Drive and your email address when prompted.
+5. Open the generated `/exec` URL with an account in that domain and grant access to Google Drive, your email address, and external connections when prompted. External connections are used to read several Drive files in parallel; the app connects only to `www.googleapis.com`.
 
-To update the app, replace the generated files and assign a new version to the existing deployment under **Manage deployments**. The existing `/exec` URL will continue to work.
+To update the app, replace the generated files and assign a new version to the existing deployment under **Manage deployments**. The existing `/exec` URL will continue to work. When an update adds permissions to the manifest, each user is asked to grant them the next time they open the app.
 
 ## Try it
 
