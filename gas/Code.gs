@@ -5,6 +5,8 @@
 const FOLDER_MIME_='application/vnd.google-apps.folder';
 const MAX_JSON_BYTES_=1024*1024;
 const LOCK_TIMEOUT_MS_=7000;
+// CacheService values are limited to 100 KB.
+const CACHE_MAX_BYTES_=80000;
 
 function isDriveId_(id) {return typeof id==='string'&&/^[\w-]{1,128}$/.test(id);}
 
@@ -148,13 +150,39 @@ function driveStore_(root) {
     if(hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes))!==digest_(text))fail('INVALID_DATA','UTF-8のファイルを指定してください。');
     return text;
   }
+  // Reads a stored page and returns the SHA-256 of its bytes. Pages were written
+  // by this app from valid strings, so when the hash matches the recorded page
+  // hash, the bytes are known to be valid UTF-8 and need no second check.
+  function blobTextWithHash(file, max) {
+    if(!file?.capabilities?.canDownload)forbidden();
+    if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+    let blob;
+    try {blob=DriveApp.getFileById(file.id).getBlob();}catch(e){if(unavailable(e))forbidden();throw e;}
+    const bytes=blob.getBytes();
+    if(bytes.length>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+    return {text:blob.getDataAsString('UTF-8'),sha256:hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes))};
+  }
+  const cacheable=file=>!!file?.version&&Number(file.size)<=CACHE_MAX_BYTES_&&file.capabilities?.canDownload===true;
+  const cacheKey=file=>'file-text:'+digest_(file.id+':'+file.version);
+  // Texts loaded in bulk by preloadTexts, keyed like the user cache.
+  const preloaded=new Map();
+  // Fetches many cached files in one CacheService call instead of one call each.
+  function preloadTexts(files) {
+    const keys=[...new Set(files.filter(cacheable).map(cacheKey))].filter(key=>!preloaded.has(key));
+    if(!keys.length)return;
+    try {
+      const found=CacheService.getUserCache().getAll(keys);
+      for(const key of Object.keys(found))preloaded.set(key,found[key]);
+    }catch(e){console.warn('File cache unavailable');}
+  }
   // Small files are cached per user for 5 minutes, keyed by Drive file version.
   function readCachedText(file,max) {
     if(!file?.capabilities?.canDownload)forbidden();
     if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    if(!file.version || !(Number(file.size)<=80000)) return blobText(file,max);
+    if(!cacheable(file)) return blobText(file,max);
     let cache;
-    const key='file-text:'+digest_(file.id+':'+file.version);
+    const key=cacheKey(file);
+    if(preloaded.has(key))return preloaded.get(key);
     try {
       cache=CacheService.getUserCache();
       const cached=cache.get(key);
@@ -177,7 +205,7 @@ function driveStore_(root) {
   }
   function canAdd(id) {const f=meta(id);return f?.mimeType===folder && f.capabilities?.canAddChildren===true;}
   return {
-    clearMetadata() {metadata.clear();preparedDocuments.clear();},
+    clearMetadata() {metadata.clear();preparedDocuments.clear();preloaded.clear();},
     prefetchVersions(refs) {
       const clauses=new Set();
       for(const {versionsFolderId,v,page} of refs){
@@ -207,6 +235,8 @@ function driveStore_(root) {
       const ids=files.map(f=>f.id);
       for(const file of files)metadata.set(file.id,file);
       prepareDocuments(ids);
+      // Manifest metadata came from the prefetch above; no extra Drive calls here.
+      preloadTexts(files.map(f=>metadata.get(f.appProperties?.manifest)).filter(Boolean));
       return {ids,cursor:page.nextPageToken||null};
     },
     findDocument(id) {
@@ -229,7 +259,9 @@ function driveStore_(root) {
       if(!child(f,version.folderId,'text/html')||f.name!==`page-${index}.html`||f.appProperties?.shssPagePath!==page.path||!f.capabilities?.canDownload)notFound();
       return f;
     },
-    readHtml: f=>readCachedText(f,SHSSCore.limits.html),
+    // Small pages come from the cache as text; core hashes them. Large pages are
+    // read once and returned with the hash of their bytes.
+    readHtml: f=>cacheable(f)?readCachedText(f,SHSSCore.limits.html):blobTextWithHash(f,SHSSCore.limits.html),
     commentsFile(docId,id) {
       const f=meta(id);
       return child(f,docId,'application/json')&&f.name==='comments.json'&&f.capabilities?.canDownload ? {id,canEdit:writable(f),meta:f} : null;

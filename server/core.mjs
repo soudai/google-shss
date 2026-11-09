@@ -4,6 +4,8 @@ import {inspectZip} from './zip.mjs';
 import {renderPackage,sanitizeHtml,canonicalPackageHash} from './package.mjs';
 import {sanitizeSvg,SVG_POLICY_VERSION} from './svg.mjs';
 import {normalizeAnchor} from '../shared/anchor.mjs';
+import {gunzipText} from './gzip.mjs';
+import {maxImportMiB} from './limits.mjs';
 export {AppError,SVG_POLICY_VERSION,limits};
 
 // Storage layout per document (see gas/Code.gs for the Drive implementation):
@@ -16,6 +18,8 @@ const MAX_VERSIONS = 200, MAX_PAGES = 20, MAX_PACKAGE_FILES = 100;
 // remove comments when the log is nearly full. The JSON size limit works the same way.
 const MAX_OPERATIONS = 5000, SOFT_MAX_OPERATIONS = 4500, SOFT_JSON_RATIO = 0.8;
 const ARCHIVE_ERRORS = ['NOT_FOUND','FORBIDDEN','INVALID_DATA','VERSION_MISMATCH','TOO_LARGE'];
+const SOURCE_KEYS = ['svg','svgGzip','zipBase64','html','htmlGzip','sourceFileId'];
+const SVG_MAX_BYTES = 512 * 1024;
 
 const invalid = () => fail('INVALID_DATA', '入力または保存データの形式が不正です。');
 const denied = () => fail('FORBIDDEN', 'この操作に必要なDrive権限がありません。');
@@ -145,8 +149,12 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     }
     // Drive supplies a checksum for stored content when available.
     const checksum=file.sha256Checksum?.toLowerCase();
-    const html=includeHtml||!hash(checksum) ? store.readHtml(file) : undefined;
-    if((html===undefined ? checksum : digest(html))!==pageHash) {
+    // readHtml may return {text, sha256} with the hash of the bytes it read;
+    // that saves hashing a large page a second time.
+    const read=includeHtml||!hash(checksum) ? store.readHtml(file) : undefined;
+    const html=typeof read==='string'?read:read?.text;
+    const actual=read===undefined?checksum:typeof read==='string'?digest(read):read.sha256;
+    if(actual!==pageHash) {
       fail('VERSION_MISMATCH','HTMLの内容が登録した版と一致しません。');
     }
     return html;
@@ -185,22 +193,34 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     const packageHash=canonicalPackageHash(pkg,digest);
     return {type:'package',pkg,rendered,sourceHash:packageHash,packageHash};
   }
-  // Validates exactly one of svg, zipBase64, html or sourceFileId.
-  function source(input) {
-    if(typeof input.svg==='string') {
-      if(input.html!==undefined||input.sourceFileId!==undefined||input.zipBase64!==undefined)invalid();
-      return svgSource(input.svg);
-    }
-    if(typeof input.zipBase64==='string') {
-      if(input.html!==undefined||input.sourceFileId!==undefined)invalid();
-      return zipSource(input.zipBase64,input.startPage);
-    }
-    if ((typeof input.html==='string')===token(input.sourceFileId)) invalid();
-    const file=token(input.sourceFileId)?store.readSource(input.sourceFileId):null;
-    const {html,hasSvg}=sanitizeHtml(checkHtml(file?file.text:input.html));
-    return {type:'html',html:checkHtml(html),
+  function htmlSource(text,file) {
+    const checked=checkHtml(text);
+    const {html,hasSvg}=sanitizeHtml(checked);
+    // sanitizeHtml returns the same string when it changed nothing; only
+    // rewritten HTML needs a second check. Parsing dominates import time.
+    return {type:'html',html:html===checked?html:checkHtml(html),
       ...(hasSvg?{svgPolicyVersion:SVG_POLICY_VERSION}:{}),
-      ...(file?{sourceFileId:input.sourceFileId,sourceVersion:file.version}:{})};
+      ...(file?{sourceFileId:file.id,sourceVersion:file.version}:{})};
+  }
+  // Validates exactly one source. The *Gzip variants carry base64 gzip text,
+  // which the browser sends to shorten uploads.
+  function source(input) {
+    const given=SOURCE_KEYS.filter(key=>input[key]!==undefined);
+    if(given.length!==1) invalid();
+    const [key]=given,value=input[key];
+    if(key==='sourceFileId') {
+      if(!token(value)) invalid();
+      const file=store.readSource(value);
+      return htmlSource(file.text,{id:value,version:file.version});
+    }
+    if(typeof value!=='string') invalid();
+    switch(key) {
+      case 'svg': return svgSource(value);
+      case 'svgGzip': return svgSource(gunzipText(value,SVG_MAX_BYTES,()=>fail('UNSAFE_SVG','SVGは512 KiBまでです。')));
+      case 'zipBase64': return zipSource(value,input.startPage);
+      case 'html': return htmlSource(value);
+      default: return htmlSource(gunzipText(value,limits.html,()=>fail('TOO_LARGE','HTMLは'+maxImportMiB+' MiBまでです。')));
+    }
   }
   function writeVersion(record, selected) {
     const versionId=uuid();

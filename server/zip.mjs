@@ -1,5 +1,5 @@
 import {Inflate} from 'fflate';
-import {AppError,KiB,MiB,decodeBase64 as decodeBase64Bytes,decodeUtf8,fail} from './util.mjs';
+import {AppError,KiB,MiB,crc32Final,crc32Update,decodeBase64 as decodeBase64Bytes,decodeUtf8,fail,readU32LE} from './util.mjs';
 import {validateRaster} from './image.mjs';
 import {maxImportBytes,maxImportMiB} from './limits.mjs';
 
@@ -14,9 +14,8 @@ const FLAG={encrypted:0x1,compression:0x6,descriptor:0x8,utf8:0x800};
 const S_IFMT=0xf000,S_IFREG=0x8000,S_IFDIR=0x4000;
 
 const u16=(b,i)=>b[i]|b[i+1]<<8;
-const u32=(b,i)=>(b[i]|b[i+1]<<8|b[i+2]<<16|b[i+3]<<24)>>>0;
-const crcTable=Uint32Array.from({length:256},(_,i)=>{let c=i;for(let j=0;j<8;j++)c=c&1?0xedb88320^(c>>>1):c>>>1;return c>>>0;});
-const crcUpdate=(crc,bytes)=>{for(const b of bytes)crc=crcTable[(crc^b)&255]^(crc>>>8);return crc>>>0;};
+const u32=readU32LE;
+const crcUpdate=crc32Update;
 const extension=name=>name.toLowerCase().split('.').pop();
 // macOS Finder metadata is tolerated in archives but never imported.
 const ignored=name=>name.startsWith('__MACOSX/')||name==='.DS_Store';
@@ -117,7 +116,7 @@ function extract(bytes,entry,budget,checkTime) {
       for(let at=start;at<stop;at+=1024){const end=Math.min(at+1024,stop);stream.push(bytes.subarray(at,end),end===stop);checkTime();}
     }catch(e){if(e instanceof AppError)throw e;fail('INTEGRITY_MISMATCH',`Deflateデータが壊れています: ${entry.name}`);}
   }
-  if(length!==entry.size||((crc^0xffffffff)>>>0)!==entry.crc)fail('INTEGRITY_MISMATCH',`展開サイズまたはCRCが一致しません: ${entry.name}`);
+  if(length!==entry.size||crc32Final(crc)!==entry.crc)fail('INTEGRITY_MISMATCH',`展開サイズまたはCRCが一致しません: ${entry.name}`);
   const content=new Uint8Array(length);let pos=0;
   for(const chunk of chunks){content.set(chunk,pos);pos+=chunk.length;}
   return content;

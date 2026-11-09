@@ -1,23 +1,18 @@
 import {PreviewCache,optimisticComments} from './fast-state.mjs';
-import {maxImportBytes,maxImportMiB} from '../server/limits.mjs';
-import {CommentOutbox,TitleTask,pageKey} from './background.mjs';
+import {CommentOutbox,pageKey} from './background.mjs';
+import {UNKNOWN_IMPORT,createImportDialog} from './import-dialog.mjs';
+import {createCaller,scriptRunApi} from './rpc.mjs';
+import {$,button,create} from './dom.mjs';
 import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs';
 (() => {
-  const $=id=>document.getElementById(id);
   const boot=window.SHSS_BOOT;
   const bridge=window.SHSS_BRIDGE;
   delete window.SHSS_BOOT;delete window.SHSS_BRIDGE;
-  const api=window.SHSS_API||((action,input)=>new Promise((resolve,reject)=>{
-    google.script.run.withSuccessHandler(resolve).withFailureHandler(()=>reject(new Error('通信に失敗しました。再試行してください。'))).rpc(action,input);
-  }));
-  async function call(action,input={}) {
-    let reply;
-    try {reply=await api(action,input);}catch{throw new Error('通信に失敗しました。再試行してください。');}
-    if(!reply?.ok)throw Object.assign(new Error(reply?.error?.message||'通信に失敗しました。'),reply?.error);
-    return reply.value;
-  }
+  const call=createCaller(window.SHSS_API||scriptRunApi(google.script.run));
   let current=null,frame=null,context=null,frameReady=false,found=null,threads=[],confirmedThreads=[],selected=null,draft=null,filter='open',cursor=null;
-  let generation=0,commentRequest=0,previewTimer,noticeTimer,pollTimer,append=false,importing=false,refreshing=false,revision=null,commentVersion=null,commentEpoch=null,pollDelay=15000,sourceCursor=null,regionMode=false;
+  let generation=0,commentRequest=0,previewTimer,noticeTimer,pollTimer,refreshing=false,revision=null,commentVersion=null,commentEpoch=null,pollDelay=15000,regionMode=false;
+  // Background imports; set once the import dialog is created below.
+  let imports=null;
   let replyId=null,archiveView=false,libraryDocuments=[],manageId=null;
   let validating=false,commentNotice='',prefetchTimer,prefetchBusy=false,openingAt=0;
   // Local DOM measurements contain durations only; no content or telemetry is sent.
@@ -33,7 +28,8 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     prefetchTimer=setTimeout(prefetchNext,250);
   }
   async function prefetchNext() {
-    if(prefetchBusy||outbox.running||importing||document.hidden||!prefetchQueue.length)return;
+    // Prefetching yields to uploads, which need the bandwidth more.
+    if(prefetchBusy||outbox.running||imports.busy||document.hidden||!prefetchQueue.length)return;
     prefetchBusy=true;
     try {await previews.request(prefetchQueue.shift());}catch{}
     finally {prefetchBusy=false;if(prefetchQueue.length)prefetchTimer=setTimeout(prefetchNext,250);}
@@ -80,13 +76,26 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     render();
     const next=$('reply-input');if(selection&&next&&!next.disabled){next.focus({preventScroll:true});next.setSelectionRange(...selection);}
   }
+  function showSaveDialog() {$('save-dialog').showModal();renderBackground();}
+  function importRow(job) {
+    const li=create('li');li.append(create('strong','取り込み: '+job.label));
+    const uploading=job.state==='uploading';
+    li.append(create('p',job.state==='failed'?(job.unknown?UNKNOWN_IMPORT:job.error.message):uploading?'アップロード中…':'取り込み待ち'));
+    if(job.state==='failed'){
+      if(job.unknown)li.append(button('文書一覧を確認',()=>{imports.dismiss(job);$('save-dialog').close();library();}));
+      else li.append(button('再試行',()=>imports.retry(job)),button('やめる',()=>imports.dismiss(job)));
+    }
+    return li;
+  }
   function renderBackground() {
-    const failures=outbox.entries.filter(e=>e.state==='failed').length+[...titleTasks].filter(t=>t.pending&&t.error).length;
-    const active=outbox.entries.filter(e=>e.state!=='failed').length+[...titleTasks].filter(t=>t.pending&&!t.error).length;
-    $('save-status').textContent=failures?'未保存 '+failures+'件':active?'保存中…（'+active+'件）':'';
-    $('save-details').hidden=!outbox.entries.length&&![...titleTasks].some(t=>t.pending);
+    const failures=outbox.entries.filter(e=>e.state==='failed').length+[...titleTasks].filter(t=>t.pending&&t.error).length+imports.failed.length;
+    const saving=outbox.entries.filter(e=>e.state!=='failed').length+[...titleTasks].filter(t=>t.pending&&!t.error).length;
+    const uploading=imports.active.length;
+    $('save-status').textContent=failures?'未保存 '+failures+'件':uploading?'取り込み中…（'+uploading+'件）':saving?'保存中…（'+saving+'件）':'';
+    $('save-details').hidden=!outbox.entries.length&&![...titleTasks].some(t=>t.pending)&&!imports.jobs.length;
     if(!$('save-dialog').open)return;
-    const rows=outbox.entries.map(entry=>{
+    const rows=imports.jobs.map(importRow);
+    rows.push(...outbox.entries.map(entry=>{
       const li=create('li');li.append(create('strong',entry.meta.title+' / '+(entry.request.pagePath||'index.html')));
       if(entry.request.payload.body)li.append(create('p',entry.request.payload.body));
       li.append(create('p',entry.state==='failed'?entry.error.message:entry.state==='saving'?'保存中…':'保存待ち'));
@@ -100,7 +109,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
         }));
       }
       return li;
-    });
+    }));
     for(const task of titleTasks)if(task.pending){
       const li=create('li');li.append(create('strong','タイトル: '+task.desired),create('p',task.error?.message||'タイトルを保存中…'));
       if(task.error)li.append(button('タイトルを再試行',()=>task.flush()));
@@ -109,16 +118,19 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     $('save-list').replaceChildren(...(rows.length?rows:[create('li','すべて保存しました。')]));
   }
   window.addEventListener('beforeunload',event=>{
-    if(outbox.entries.length||importing||[...titleTasks].some(t=>t.pending)){event.preventDefault();event.returnValue='';}
+    if(outbox.entries.length||imports.busy||[...titleTasks].some(t=>t.pending)){event.preventDefault();event.returnValue='';}
   });
   let messageWindow=0,messageCount=0;
   const replyDrafts=new Map();
   const pageDrafts=new Map();
   const draftKey=d=>`${d.documentId}:${d.versionId}:${d.pagePath||'index.html'}`;
-  const create=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
-  const button=(text,action,disabled=false)=>{const b=create('button',text);b.type='button';b.disabled=disabled;b.addEventListener('click',action);return b;};
-  function notify(text) {
-    $('notice').textContent=text;$('notice').hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>$('notice').hidden=true,3800);
+  // A short message at the bottom of the screen, optionally with one action.
+  // Messages with an action stay longer so there is time to use it.
+  function notify(text,action=null) {
+    const notice=$('notice');
+    notice.replaceChildren(create('span',text));
+    if(action)notice.append(button(action.label,()=>{notice.hidden=true;action.run();}));
+    notice.hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice.hidden=true,action?10000:3800);
   }
   function panel(open) {$('comments').hidden=!open;$('toggle').setAttribute('aria-expanded',String(open));}
   function bar(view,canImport=false) {
@@ -137,7 +149,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     const rows=libraryDocuments.filter(d=>d.title.toLocaleLowerCase().includes(query)).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
     $('documents').replaceChildren(...rows.map(d=>{
       const li=create('li');
-      const link=button(d.title,async()=>{await open(d.documentId,d.latestVersionId);if(current?.documentId===d.documentId)historyPage(current);});
+      const link=button(d.title,async()=>{await open(d.documentId,d.latestVersionId,undefined,'',d.title);if(current?.documentId===d.documentId)historyPage(current);});
       const warm=()=>queuePreviews([{documentId:d.documentId,versionId:d.latestVersionId}]);
       link.addEventListener('pointerenter',warm);link.addEventListener('focus',warm);
       li.append(link);
@@ -147,7 +159,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
         }));
         li.append(button(archiveView?'戻す':'アーカイブ',async()=>{
           try {
-            await call('manageDocument',{documentId:d.documentId,type:archiveView?'restore':'archive'});previews.clear();
+            await call('manageDocument',{documentId:d.documentId,type:archiveView?'restore':'archive'});documentsChanged();
             library();
           }catch(e){notify(e.message);}
         }));
@@ -157,18 +169,28 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     if(!rows.length&&!cursor)$('documents').append(create('li',query?'一致する文書はありません。':'文書がありません。'));
     queuePreviews(rows.slice(0,2).map(d=>({documentId:d.documentId,versionId:d.latestVersionId})));
   }
+  // The last first page of each list, shown at once while a fresh copy loads.
+  const libraryCache=new Map();
+  // Drops cached previews and lists after a title, version or archive change.
+  function documentsChanged() {previews.clear();libraryCache.clear();}
   async function library(more=false) {
-    if(importing)return;
-    const ticket=++generation;
-    if(!more){clean();$('library').hidden=false;$('viewer').hidden=true;$('title').textContent='';bar(false);cursor=null;libraryDocuments=[];}
+    const ticket=++generation,view=archiveView;
+    if(!more){
+      clean();$('library').hidden=false;$('viewer').hidden=true;$('title').textContent='';cursor=null;
+      const cached=libraryCache.get(view);
+      libraryDocuments=cached?[...cached.documents]:[];bar(false,cached?.canImport);
+      if(cached)renderLibrary();else $('documents').replaceChildren(create('li','読み込み中…','meta'));
+      $('load-status').textContent=cached?'更新中…':'';$('more').hidden=true;
+    }
     $('more').disabled=true;
     try {
-      const page=await call('listDocuments',{...(cursor?{cursor}:{}),archived:archiveView});
+      const page=await call('listDocuments',{...(cursor?{cursor}:{}),archived:view});
       if(ticket!==generation)return;
+      if(!more){libraryDocuments=[];libraryCache.set(view,page);}
       cursor=page.cursor;bar(false,page.canImport);$('more').hidden=!cursor;
       libraryDocuments.push(...page.documents);renderLibrary();
     }catch(e){if(ticket===generation)notify(e.message);}
-    finally {if(ticket===generation)$('more').disabled=false;}
+    finally {if(ticket===generation){$('more').disabled=false;$('load-status').textContent='';}}
   }
 
   function mountPreview(d,started=performance.now()) {
@@ -215,12 +237,12 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     }
     if(draft){panel(true);renderComposer();}
   }
-  async function open(documentId,versionId,pagePath,fragment='') {
-    if(importing)return;
+  // title, when known from the list, is shown while the document loads.
+  async function open(documentId,versionId,pagePath,fragment='',title='') {
     if(current){if(draft)pageDrafts.set(draftKey(current),{draft,body:$('body').value});else pageDrafts.delete(draftKey(current));}
     const input={documentId,...(versionId?{versionId}:{}),...(pagePath?{pagePath}:{})};
     const cached=previews.peek(input),ticket=++generation;openingAt=performance.now();$('preview').dataset.displayMs='';$('preview').dataset.source=cached?'prefetched':'network';clean();bar(false);$('library').hidden=true;$('viewer').hidden=false;
-    $('preview').textContent='読み込み中…';$('title').textContent='';
+    $('preview').textContent='読み込み中…';$('title').textContent=title;
     if(cached)showDocument(cached,fragment,true);
     try {
       const d=await previews.request(input);
@@ -392,7 +414,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
   $('compose').addEventListener('submit',e=>{
     e.preventDefault();const body=$('body').value;if(draft&&body.trim())mutate('add',{anchor:draft,body});
   });
-  $('save-details').onclick=()=>{$('save-dialog').showModal();renderBackground();};
+  $('save-details').onclick=showSaveDialog;
   $('cancel').onclick=()=>{draft=null;$('body').value='';if(selected==='draft')selected=null;renderComposer();sync();};
   $('toggle').onclick=()=>panel($('comments').hidden);$('close').onclick=()=>{panel(false);$('toggle').focus();};
   function setRegionMode(enabled) {
@@ -407,7 +429,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
   };
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&regionMode){setRegionMode(false);sync();}});
   $('active').onclick=()=>{filter='open';render();};$('hidden').onclick=()=>{filter='hidden';render();};
-  $('reload').onclick=()=>refresh();$('home').onclick=()=>{if(importing)return;library();if(globalThis.google?.script?.history?.push)google.script.history.push({}, {},'');else history.pushState({},'',location.pathname);};$('more').onclick=()=>library(true);
+  $('reload').onclick=()=>refresh();$('home').onclick=()=>{library();if(globalThis.google?.script?.history?.push)google.script.history.push({}, {},'');else history.pushState({},'',location.pathname);};$('more').onclick=()=>library(true);
   function historyPage(d,mode='push') {
     const params={doc:d.documentId,v:d.versionId,p:d.pagePath};
     if(globalThis.google?.script?.history?.[mode])google.script.history[mode]({},params,'');
@@ -426,7 +448,7 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     e.preventDefault();
     try {
       await call('manageDocument',{documentId:manageId,type:'rename',title:$('manage-name').value});
-      previews.clear();$('manage-dialog').close();library();
+      documentsChanged();$('manage-dialog').close();library();
     }catch(error){notify(error.message);}
   };
   $('preview-reload').onclick=()=>{
@@ -452,138 +474,24 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
       const li=create('li');li.append(button(new Date(v.createdAt).toLocaleString('ja-JP')+(v.versionId===d.versionId?'（表示中）':''),async()=>{$('version-dialog').close();await open(d.documentId,v.versionId);if(current?.versionId===v.versionId)historyPage(current);}));return li;
     }));$('append').hidden=!d.canAppend;$('version-dialog').showModal();
   };
-  let importSession=null,importTarget=null,titleTimer,lastAutoTitle='';
-  function importDialog(isAppend) {
-    if(importing||validating)return;
-    previews.clear();append=isAppend;importTarget=isAppend?current.documentId:null;importSession=null;lastAutoTitle='';clearTimeout(titleTimer);$('import-form').reset();$('start-page-field').hidden=true;$('import-error').textContent='';$('name-field').hidden=append;$('name').required=false;$('import-title-retry').hidden=true;$('import-status').textContent='';$('import-submit').textContent='取り込む';
-    sourceCursor=null;$('source-list').replaceChildren();$('source-list').hidden=true;$('source-more').hidden=true;
-    $('import-title').textContent=append?'新版を取り込む':'HTMLを取り込む';$('import-dialog').showModal();
-  }
-  async function loadSources(more=false) {
-    $('source-load').disabled=true;$('source-more').disabled=true;
-    try {
-      const page=await call('listSources',more&&sourceCursor?{cursor:sourceCursor}:{});
-      if(!more)$('source-list').replaceChildren(new Option('HTMLを選択',''));
-      for(const file of page.files)$('source-list').add(new Option(file.name,file.id));
-      sourceCursor=page.cursor;$('source-list').hidden=false;$('source-more').hidden=!sourceCursor;
-    }catch(e){$('import-error').textContent=e.message;}
-    finally{$('source-load').disabled=false;$('source-more').disabled=false;}
-  }
-  $('source-load').onclick=()=>loadSources();
-  $('source-more').onclick=()=>loadSources(true);
-  $('source-list').onchange=()=>{if($('source-list').value){$('drive').value=$('source-list').value;$('file').value='';}};
-  $('import').onclick=()=>importDialog(false);$('append').onclick=()=>{$('version-dialog').close();importDialog(true);};
-  $('import-cancel').onclick=()=>{if(!importing){$('import-dialog').close();if(importSession?.result&&!$('library').hidden)library();}};
-  $('import-dialog').addEventListener('cancel',e=>{if(importing)e.preventDefault();});
-  $('file').addEventListener('change',()=>{
-    if(importing||!$('file').files[0])return;
-    importSession=null;$('drive').value='';$('start-page-field').hidden=true;$('start-page').replaceChildren();
-    const autoTitle=($('file').files[0].name.replace(/\.(?:html?|zip|svg)$/i,'')||'新しい文書').slice(0,160);
-    if(!$('name').value.trim()||$('name').value===lastAutoTitle)$('name').value=autoTitle;
-    lastAutoTitle=autoTitle;
-    void beginImport();
+  const importer=createImportDialog({
+    call,notify,library,documentsChanged,showSaveDialog,
+    changed:()=>renderBackground(),
+    async openDocument(documentId,versionId) {
+      await open(documentId,versionId);
+      if(current?.documentId===documentId)historyPage(current);
+    },
+    titleSaved(documentId,title) {
+      if(current?.documentId===documentId){current.title=title;$('title').textContent=title;}
+      for(const row of libraryDocuments)if(row.documentId===documentId)row.title=title;
+      if(!$('library').hidden)renderLibrary();
+    },
+    addTitleTask:task=>titleTasks.add(task),
+    isLibraryVisible:()=>!$('library').hidden
   });
-  $('name').addEventListener('input',()=>{
-    const session=importSession;if(!session?.result||append)return;
-    session.titleTask.setTitle($('name').value.trim()||session.initialTitle);
-    clearTimeout(titleTimer);titleTimer=setTimeout(()=>session.titleTask.flush(),400);
-  });
-  $('import-title-retry').onclick=()=>importSession?.titleTask?.flush();
-  $('start-page').addEventListener('change',()=>{
-    if(importSession?.prepared&&$('start-page').value)void beginImport();
-  });
-  function driveId(raw) {
-    if(/^[\w-]{1,128}$/.test(raw))return raw;
-    const url=new URL(raw);const id=url.pathname.match(/^\/file\/d\/([\w-]{1,128})(?:\/|$)/)?.[1]||url.searchParams.get('id');
-    if(url.origin!=='https://drive.google.com'||!id||!(/^[\w-]{1,128}$/.test(id)))throw new Error('Google DriveのファイルURLまたはIDを指定してください。');
-    return id;
-  }
-  function importStatus() {
-    const session=importSession;if(!session)return;
-    $('import-title-retry').hidden=!session.titleTask?.error;
-    $('import-status').textContent=session.result?
-      session.titleTask?.error?'ファイルの取り込みは完了しました。タイトルは未保存です。タイトルの保存だけを再試行できます。':
-      session.titleTask?.pending?'取り込み完了。タイトルを保存中です。':'取り込みが完了しました。':
-      session.phase==='choose'?'開始ページを選ぶと取り込みを続けます。':
-      session.phase==='reading'?'ファイルを読み込み中…':
-      session.phase==='inspect'?'ZIPを確認中… タイトルを入力できます。':
-      session.phase==='upload'?'取り込み中… タイトルを入力できます。':'';
-    $('import-submit').textContent=session.result?'文書を開く':session.unknown?'一覧を確認':'取り込む';
-  }
-  function importControls(busy) {
-    importing=busy;$('import-cancel').textContent=importSession?.sent?'閉じる':'キャンセル';
-    for(const id of ['file','drive','source-load','source-list','source-more','start-page','import-submit','import-cancel'])$(id).disabled=busy;
-    importStatus();
-  }
-  async function openImported(session) {
-    // Opening the document need not wait for its title update.
-    if(session.titleTask?.pending)void session.titleTask.flush();
-    $('import-dialog').close();
-    await open(session.result.documentId,session.result.versionId);
-    if(current?.documentId===session.result.documentId)historyPage(current);
-  }
-  async function beginImport() {
-    if(importing)return;
-    if(importSession?.result){await openImported(importSession);return;}
-    if(importSession?.unknown){$('import-dialog').close();await library();return;}
-    const file=$('file').files[0],link=$('drive').value.trim();
-    if(!!file===!!link){$('import-error').textContent='ファイルまたはDrive URLの一方を指定してください。';return;}
-    const session=importSession||={target:importTarget,initialTitle:$('name').value.trim()||'Driveから取り込み',phase:'reading',prepared:null,result:null,sent:false};
-    importControls(true);$('import-error').textContent='';
-    try {
-      let input=session.prepared;
-      if(!input) {
-        input={};
-        if(file){
-          if(/\.zip$/i.test(file.name)){
-            if(file.size>maxImportBytes)throw new Error('ZIPは'+maxImportMiB+' MiBまでです。');
-            const bytes=new Uint8Array(await file.arrayBuffer());let encoded='';
-            for(let at=0;at<bytes.length;at+=24576)encoded+=btoa(String.fromCharCode(...bytes.subarray(at,at+24576)));
-            input.zipBase64=encoded;session.phase='inspect';importStatus();
-            const inspection=await call('inspectPackage',{zipBase64:encoded,...(session.target?{documentId:session.target}:{})});
-            if(!inspection.startPage){
-              session.prepared=input;session.phase='choose';
-              $('start-page').replaceChildren(new Option('開始ページを選択',''),...inspection.pages.map(path=>new Option(path,path)));
-              $('start-page-field').hidden=false;return;
-            }
-            input.startPage=inspection.startPage;
-          }else if(/\.svg$/i.test(file.name)){
-            if(file.size>512*1024)throw new Error('SVGは512 KiBまでです。');
-            input.svg=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer());
-          }else{
-            if(!/\.html?$/i.test(file.name)||file.size>maxImportBytes)throw new Error(maxImportMiB+' MiB以内のHTMLまたはZIPを指定してください。');
-            input.html=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(await file.arrayBuffer());
-          }
-        }else input.sourceFileId=driveId(link);
-      }else{
-        if(!$('start-page').value){session.phase='choose';return;}
-        input={...input,startPage:$('start-page').value};
-      }
-      session.phase='upload';importStatus();session.sent=true;
-      session.result=await call(session.target?'appendVersion':'importDocument',{
-        ...input,...(session.target?{documentId:session.target}:{title:session.initialTitle})
-      });
-      session.prepared=null;session.phase='ready';
-      if(!session.target){
-        const task=new TitleTask(input=>call('manageDocument',input),{
-          documentId:session.result.documentId,title:session.initialTitle,
-          changed:()=>{renderBackground();if(importSession===session)importStatus();},
-          saved:title=>{
-            previews.clear();
-            if(current?.documentId===session.result.documentId){current.title=title;$('title').textContent=title;}
-            for(const row of libraryDocuments)if(row.documentId===session.result.documentId)row.title=title;
-            if(!$('library').hidden)renderLibrary();
-          }
-        });
-        session.titleTask=task;titleTasks.add(task);
-        task.setTitle($('name').value.trim()||session.initialTitle);void task.flush();
-      }
-    }catch(error){
-      session.phase='error';session.unknown=session.sent&&(!error.code||error.code==='INTERNAL');
-      $('import-error').textContent=session.unknown?'取り込み結果を確認できません。重複を避けるため、文書一覧を確認してください。':error.message;
-    }finally{importControls(false);}
-  }
-  $('import-form').addEventListener('submit',e=>{e.preventDefault();void beginImport();});
+  imports=importer.queue;
+  $('import').onclick=()=>{if(!validating)importer.show(null);};
+  $('append').onclick=()=>{$('version-dialog').close();if(!validating&&current)importer.show(current.documentId);};
   const params=boot.local?new URLSearchParams(location.search):null;
   const doc=boot.documentId||params?.get('doc');
   if(globalThis.google?.script?.history?.setChangeHandler)google.script.history.setChangeHandler(e=>{const p=e.location.parameter;if(p.doc)open(p.doc,p.v,p.p);else library();});

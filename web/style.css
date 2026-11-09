@@ -15,6 +15,7 @@ dialog{width:min(460px,calc(100% - 24px));border:1px solid var(--line);border-ra
 
 #save-list li{padding:12px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}#save-list p{white-space:pre-wrap}#save-details{font-size:12px}#import-status{color:var(--muted)}
 
+#notice{display:flex;align-items:center;gap:8px}#notice button{color:inherit;text-decoration:underline;padding:2px 6px}#notice button:hover{background:transparent}
 #external-url{overflow-wrap:anywhere;unicode-bidi:isolate}
 #external-open{color:inherit;padding:6px 10px}
 

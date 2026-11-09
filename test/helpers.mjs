@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {gzipSync} from 'node:zlib';
 import {zipSync,strToU8} from 'fflate';
 
 export const digest = value => createHash('sha256').update(typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value)).digest('hex');
@@ -18,6 +19,8 @@ export function zip(files) {
 }
 
 export const zipBase64 = files => Buffer.from(zip(files)).toString('base64');
+
+export const gzipBase64 = text => gzipSync(Buffer.from(text, 'utf8')).toString('base64');
 
 // In-memory implementation of the store interface that gas/Code.gs implements on Drive.
 export function memoryStore({canImport = true, canEditComments = true, canManage = true} = {}) {
@@ -39,7 +42,11 @@ export function memoryStore({canImport = true, canEditComments = true, canManage
     },
     htmlFile(docId, versionsId, version) {return files.get(version.htmlFileId);},
     pageFile(docId, versionsId, version, page) {return files.get(page.htmlFileId);},
-    readHtml: file => file.text,
+    // Like gas/Code.gs: small pages come back as text, large ones with the hash of their bytes.
+    readHtml(file) {
+      store.htmlReads = (store.htmlReads || 0) + 1;
+      return file.text.length <= 80000 ? file.text : {text: file.text, sha256: digest(file.text)};
+    },
     commentsFile(docId, fileId) {
       const meta = files.get(fileId);
       return meta ? {id: fileId, canEdit: store.permissions.canEditComments, meta} : null;

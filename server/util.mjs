@@ -64,7 +64,21 @@ export function decodeUtf8(bytes, code, message) {
   return parts.join('') + chars.join('');
 }
 
-const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const crcTable = Uint32Array.from({length: 256}, (_, i) => {
+  let c = i;
+  for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+// CRC-32 as used by ZIP and gzip. Start with 0xffffffff and finish with crc32Final.
+export function crc32Update(crc, bytes) {
+  for (const b of bytes) crc = crcTable[(crc ^ b) & 255] ^ (crc >>> 8);
+  return crc >>> 0;
+}
+export const crc32Final = crc => (crc ^ 0xffffffff) >>> 0;
+
+export const readU32LE = (b, i) => (b[i] | b[i + 1] << 8 | b[i + 2] << 16 | b[i + 3] << 24) >>> 0;
+
+const BASE64 ='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 export function encodeBase64(bytes) {
   const parts = [];

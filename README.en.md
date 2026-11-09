@@ -28,7 +28,7 @@ Click an HTTPS link in a document to see the destination. Review the address, th
 
 ### Import, navigate, and share
 
-- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs.
+- Choose an HTML, ZIP, or static SVG file under **取り込み** (Import) to start importing it. You can edit the title while the import runs. Closing the dialog does not stop the import; a notice appears when it finishes. **保存状況** (Save status) shows progress and lets you retry a failed import.
 - Switch between pages in a ZIP package using the page menu or links in the document. Comments are saved for each version and page.
 - Use **版** (Versions) to open an earlier version. Use **URLをコピー** (Copy URL) to share a direct link to the version and page you are viewing. Readers and commenters need the relevant Drive permissions.
 - Use **プレビューを再読み込み** (Reload preview) to reset the HTML's interactive controls, such as tabs, to their initial state.
