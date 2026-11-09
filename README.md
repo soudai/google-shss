@@ -45,6 +45,8 @@ node --check < dist/gas/Code.gs
 
 `dist/gas/` に `Code.gs`、`Index.html`、`appsscript.json` が生成されます。
 
+`npm test` で、取り込み時の安全検査とコメント処理のテストを実行できます。`npm run check` は、テスト、ビルド、構文確認をまとめて実行します。
+
 ## Apps Script にデプロイ
 
 1. [Apps Script](https://script.google.com/) でスタンドアロンのプロジェクトを作成します。「プロジェクトの設定」でマニフェストを表示し、生成した 3 ファイルを配置します。HTML ファイルの名前はエディタ上で `Index` にします。

@@ -1,13 +1,15 @@
-import {AppError} from './html.mjs';
+import {fail,MiB,PIXEL_LIMITS} from './util.mjs';
 
-const fail=(code,message)=>{throw new AppError(code,message);};
+// Parses just enough of each raster format to bound the decoded size, so that a
+// small file cannot expand into a huge bitmap in the reviewer's browser.
+const {side:maxSide,area:maxArea,frames:maxFrames}=PIXEL_LIMITS;
 const u16=(b,i)=>b[i]|b[i+1]<<8;
 const u16be=(b,i)=>b[i]<<8|b[i+1];
 const u24=(b,i)=>b[i]|b[i+1]<<8|b[i+2]<<16;
 const u32be=(b,i)=>(b[i]*0x1000000+(b[i+1]<<16|b[i+2]<<8|b[i+3]))>>>0;
 const ascii=(b,i,n)=>String.fromCharCode(...b.subarray(i,i+n));
 function size(width,height,pixels=width*height) {
-  if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1||width>8192||height>8192||pixels>16000000)fail('LIMIT_EXCEEDED','画像の幅・高さ・フレーム画素数が上限を超えています。');
+  if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1||width>maxSide||height>maxSide||pixels>maxArea)fail('LIMIT_EXCEEDED','画像の幅・高さ・フレーム画素数が上限を超えています。');
 }
 function png(bytes) {
   if(bytes.length<24||ascii(bytes,0,8)!=='\x89PNG\r\n\x1a\n'||ascii(bytes,12,4)!=='IHDR'||u32be(bytes,8)!==13)fail('UNSUPPORTED_TYPE','PNGのヘッダーが不正です。');
@@ -31,7 +33,7 @@ function gif(bytes) {
     if(marker===0x21){if(at>=bytes.length)fail('UNSUPPORTED_TYPE','GIFの拡張が壊れています。');at++;blocks();continue;}
     if(marker!==0x2c||at+9>bytes.length)fail('UNSUPPORTED_TYPE','GIFの画像が不正です。');
     const w=u16(bytes,at+4),h=u16(bytes,at+6);size(w,h);pixels+=w*h;frames++;at+=9;
-    if(pixels>16000000||frames>100)fail('LIMIT_EXCEEDED','GIFの総フレーム画素数が上限を超えています。');
+    if(pixels>maxArea||frames>maxFrames)fail('LIMIT_EXCEEDED','GIFの総フレーム画素数が上限を超えています。');
     if(bytes[at-1]&0x80)at+=3*(1<<((bytes[at-1]&7)+1));
     if(at>=bytes.length)fail('UNSUPPORTED_TYPE','GIFの画像が途中で終わっています。');
     at++;blocks();
@@ -64,13 +66,13 @@ function webp(bytes) {
     if(tag==='VP8X'&&n>=10){width=u24(bytes,from+4)+1;height=u24(bytes,from+7)+1;size(width,height);}
     if(tag==='VP8 '&&n>=10&&ascii(bytes,from+3,3)==='\x9d\x01\x2a'){width=u16(bytes,from+6)&0x3fff;height=u16(bytes,from+8)&0x3fff;size(width,height);}
     if(tag==='VP8L'&&n>=5&&bytes[from]===0x2f){width=1+((bytes[from+2]&0x3f)<<8|bytes[from+1]);height=1+((bytes[from+4]&0xf)<<6|bytes[from+3]>>2);size(width,height);}
-    if(tag==='ANMF'&&n>=16){const w=u24(bytes,from+6)+1,h=u24(bytes,from+9)+1;size(w,h);pixels+=w*h;frames++;if(pixels>16000000||frames>100)fail('LIMIT_EXCEEDED','WebPの総フレーム画素数が上限を超えています。');}
+    if(tag==='ANMF'&&n>=16){const w=u24(bytes,from+6)+1,h=u24(bytes,from+9)+1;size(w,h);pixels+=w*h;frames++;if(pixels>maxArea||frames>maxFrames)fail('LIMIT_EXCEEDED','WebPの総フレーム画素数が上限を超えています。');}
     at=from+n+(n&1);
   }
   if(!width||!height||at!==bytes.length)fail('UNSUPPORTED_TYPE','WebPのサイズを確認できません。');
 }
 export function validateRaster(mime,bytes) {
-  if(!(bytes instanceof Uint8Array)||bytes.length>2*1024*1024)fail('LIMIT_EXCEEDED','画像は2 MiBまでです。');
+  if(!(bytes instanceof Uint8Array)||bytes.length>2*MiB)fail('LIMIT_EXCEEDED','画像は2 MiBまでです。');
   if(mime==='image/png')png(bytes);
   else if(mime==='image/jpeg')jpeg(bytes);
   else if(mime==='image/gif')gif(bytes);

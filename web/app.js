@@ -1,5 +1,6 @@
 import {PreviewCache,optimisticComments} from './fast-state.mjs';
 import {CommentOutbox,TitleTask,pageKey} from './background.mjs';
+import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs';
 (() => {
   const $=id=>document.getElementById(id);
   const boot=window.SHSS_BOOT;
@@ -274,8 +275,8 @@ import {CommentOutbox,TitleTask,pageKey} from './background.mjs';
     if(draft)items.push({id:'draft',anchor:draft});
     frame.contentWindow.postMessage({...context,type:'annotations',items,selected,focus,regionMode},'*');
   }
-  const validAnchor=a=>a&&a.type==='text'&&typeof a.exact==='string'&&a.exact.trim()&&a.exact.length<=500&&typeof a.prefix==='string'&&a.prefix.length<=120&&typeof a.suffix==='string'&&a.suffix.length<=120&&Number.isSafeInteger(a.position?.start)&&a.position.start>=0&&a.position.end===a.position.start+a.exact.length&&a.position.end<=2*1024*1024;
-  const validRegion=a=>a?.type==='region'&&typeof a.path==='string'&&a.path.length<=500&&typeof a.signature==='string'&&a.signature.length<=128&&['IMG','SVG','CANVAS','FIGURE'].includes(a.tag)&&[a.rect?.x,a.rect?.y,a.rect?.w,a.rect?.h].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1)&&a.rect.w>0&&a.rect.h>0&&a.rect.x+a.rect.w<=1.00001&&a.rect.y+a.rect.h<=1.00001;
+  // Messages from the preview iframe (web/bridge.js). The frame runs untrusted
+  // HTML, so every field is checked before use.
   window.addEventListener('message',e=>{
     const p=e.data;
     if(!frame||e.source!==frame.contentWindow||e.origin!=='null'||!p||p.shss!==1||p.session!==context.session||p.documentId!==context.documentId||p.versionId!==context.versionId||p.pagePath!==context.pagePath)return;
@@ -289,11 +290,11 @@ import {CommentOutbox,TitleTask,pageKey} from './background.mjs';
     if(p.type==='region-cancel'){setRegionMode(false);sync();return;}
     if(p.type==='blocked')$('comment-status').textContent='HTML内の外部読み込みをブロックしました。';
     if(p.type==='locations'&&Array.isArray(p.found)&&p.found.length<=501){found=new Set(p.found.filter(id=>typeof id==='string'&&id.length<=128));updateLocations();}
-    if(p.type!=='selection'||!(validAnchor(p.anchor)||(regionMode&&validRegion(p.anchor)))||(!current.canWriteComments&&!current.canPrepareComment))return;
+    if(p.type!=='selection'||!(isTextAnchor(p.anchor)||(regionMode&&isRegionAnchor(p.anchor)))||(!current.canWriteComments&&!current.canPrepareComment))return;
     if(draft&&$('body').value.trim()){panel(true);return;}
-    const a=p.anchor;draft=a.type==='region'?{type:'region',path:a.path,tag:a.tag,signature:a.signature,rect:{...a.rect}}:{type:'text',exact:a.exact,prefix:a.prefix,suffix:a.suffix,position:{start:a.position.start,end:a.position.end}};
+    draft=normalizeAnchor(p.anchor);
     if(regionMode)setRegionMode(false);
-    selected='draft';panel(true);renderComposer();sync();if(a.type==='region')$('body').focus();
+    selected='draft';panel(true);renderComposer();sync();if(draft.type==='region')$('body').focus();
   });
   function updateLocations() {
     for(const el of $('threads').querySelectorAll('.missing'))el.hidden=!found||found.has(el.dataset.thread);

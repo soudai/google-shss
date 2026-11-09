@@ -1,6 +1,11 @@
 import {SaxesParser} from 'saxes';
 import * as cssTree from 'css-tree';
-import {AppError,utf8Size} from './html.mjs';
+import {AppError,KiB,PIXEL_LIMITS,utf8Size} from './util.mjs';
+
+// SVG is rebuilt from an allow-list instead of being filtered: only the elements,
+// attributes and CSS properties below survive, and every reference must point to
+// an #id inside the same image. Bump SVG_POLICY_VERSION whenever the policy
+// changes so that stored versions are re-imported under the new rules.
 
 const SVG='http://www.w3.org/2000/svg',XLINK='http://www.w3.org/1999/xlink';
 export const SVG_POLICY_VERSION=1;
@@ -8,7 +13,9 @@ const tags=new Set(['svg','g','defs','style','symbol','use','path','rect','circl
 const attrs=new Set(['id','class','role','aria-label','viewBox','preserveAspectRatio','x','y','width','height','cx','cy','r','rx','ry','x1','y1','x2','y2','points','d','offset','transform','gradientTransform','gradientUnits','spreadMethod','maskUnits','maskContentUnits','clipPathUnits','fill','fill-rule','stroke','stroke-width','stroke-linecap','stroke-linejoin','stroke-dasharray','stroke-dashoffset','stroke-opacity','fill-opacity','opacity','color','display','visibility','stop-color','stop-opacity','font-size','font-family','font-weight','text-anchor','dominant-baseline','style','href','clip-path','mask']);
 const cssProperties=new Set(['fill','fill-rule','stroke','stroke-width','stroke-linecap','stroke-linejoin','stroke-dasharray','stroke-dashoffset','stroke-opacity','fill-opacity','opacity','color','display','visibility','stop-color','stop-opacity','font-size','font-family','font-weight','text-anchor','dominant-baseline','clip-path','mask']);
 const fail=(message)=>{throw new AppError('UNSAFE_SVG',message);};
-const maxCost=100000,maxExpansionDepth=128;
+const maxCost=100000,maxExpansionDepth=128,maxElements=10000,maxNesting=64,maxBytes=512*KiB;
+const paintAttributes=new Set(['fill','stroke','clip-path','mask','stop-color']);
+const textContainers=new Set(['style','text','tspan','title','desc']);
 const numberPattern=/[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi;
 const pathArity={m:2,l:2,h:1,v:1,c:6,s:4,q:4,t:2,a:4,z:0};
 const escapeText=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -30,30 +37,27 @@ function drawingCost({tag,attrs}) {
   }
   return cost;
 }
-function css(raw,references) {
+const cssContexts={
+  stylesheet:{options:{context:'stylesheet',parseValue:true},parse:'SVGのCSSを解析できません。',syntax:'SVGのCSS構文は対象外です。',property:'SVGのCSSプロパティは対象外です',fn:'SVGのCSS関数は対象外です。'},
+  style:{options:{context:'declarationList',parseValue:true},parse:'SVGのstyle属性を解析できません。',syntax:'SVGのstyle属性が不正です。',property:'SVGのstyle属性は対象外です',fn:'SVGのCSS関数は対象外です。'},
+  paint:{options:{context:'value'},parse:'SVGの描画属性を解析できません。',syntax:'SVGの描画属性を解析できません。',fn:'SVGの関数は対象外です。'}
+};
+// Validates CSS (a <style> body, a style attribute or a paint attribute value),
+// records its url(#id) references and returns the regenerated text.
+function css(raw,kind,references) {
+  const rules=cssContexts[kind];
   let ast;
-  try {ast=cssTree.parse(raw,{context:'stylesheet',parseValue:true,onParseError:e=>{throw e;}});}catch{fail('SVGのCSSを解析できません。');}
+  try {ast=cssTree.parse(raw,{...rules.options,onParseError:e=>{throw e;}});}catch{fail(rules.parse);}
   cssTree.walk(ast,node=>{
-    if(node.type==='Raw'||node.type==='Atrule')fail('SVGのCSS構文は対象外です。');
-    if(node.type==='Declaration'&&!cssProperties.has(node.property.toLowerCase()))fail(`SVGのCSSプロパティは対象外です: ${node.property}`);
+    if(node.type==='Raw'||kind!=='paint'&&node.type==='Atrule')fail(rules.syntax);
+    if(node.type==='Declaration'&&!cssProperties.has(node.property.toLowerCase()))fail(`${rules.property}: ${node.property}`);
     if(node.type==='Url')references.push(ref(node.value));
-    if(node.type==='Function'&&/^(?:var|env|attr|calc)$/i.test(node.name))fail('SVGのCSS関数は対象外です。');
-  });
-  return cssTree.generate(ast);
-}
-function styleAttribute(raw,references) {
-  let ast;
-  try {ast=cssTree.parse(raw,{context:'declarationList',parseValue:true,onParseError:e=>{throw e;}});}catch{fail('SVGのstyle属性を解析できません。');}
-  cssTree.walk(ast,node=>{
-    if(node.type==='Raw'||node.type==='Atrule')fail('SVGのstyle属性が不正です。');
-    if(node.type==='Declaration'&&!cssProperties.has(node.property.toLowerCase()))fail(`SVGのstyle属性は対象外です: ${node.property}`);
-    if(node.type==='Url')references.push(ref(node.value));
-    if(node.type==='Function'&&/^(?:var|env|attr|calc)$/i.test(node.name))fail('SVGのCSS関数は対象外です。');
+    if(node.type==='Function'&&/^(?:var|env|attr|calc)$/i.test(node.name))fail(rules.fn);
   });
   return cssTree.generate(ast);
 }
 function checkDimensions(width,height) {
-  if(!Number.isFinite(width)||!Number.isFinite(height)||width<=0||height<=0||width>8192||height>8192||width*height>16000000)fail('SVGの描画領域が上限を超えるか不明です。');
+  if(!Number.isFinite(width)||!Number.isFinite(height)||width<=0||height<=0||width>PIXEL_LIMITS.side||height>PIXEL_LIMITS.side||width*height>PIXEL_LIMITS.area)fail('SVGの描画領域が上限を超えるか不明です。');
 }
 const pixelsPerUnit={px:1,in:96,cm:96/2.54,mm:96/25.4,q:96/101.6,pt:96/72,pc:16};
 function dimension(value,fallback) {
@@ -75,31 +79,23 @@ function dimensions(root) {
   checkDimensions(dimension(root.attrs.width,width),dimension(root.attrs.height,height));
 }
 export function sanitizeSvg(source) {
-  if(typeof source!=='string'||utf8Size(source)>512*1024)fail('SVGは512 KiBまでです。');
+  if(typeof source!=='string'||utf8Size(source)>maxBytes)fail('SVGは512 KiBまでです。');
   const parser=new SaxesParser({xmlns:true});let root=null,top=null,count=0,operations=0,closed=false;
   const ids=new Map();
   parser.on('doctype',()=>fail('SVGのDOCTYPEは使えません。'));
   parser.on('processinginstruction',()=>fail('SVGの処理命令は使えません。'));
   parser.on('error',()=>fail('SVGのXMLが不正です。'));
   parser.on('opentag',tag=>{
-    if(closed||tag.uri!==SVG||!tags.has(tag.local)||!top&&tag.local!=='svg'||top&&top.depth>=64)fail(`SVG要素は対象外です: ${tag.name}`);
-    if(++count>10000)fail('SVGの要素数が上限を超えています。');
+    if(closed||tag.uri!==SVG||!tags.has(tag.local)||!top&&tag.local!=='svg'||top&&top.depth>=maxNesting)fail(`SVG要素は対象外です: ${tag.name}`);
+    if(++count>maxElements)fail('SVGの要素数が上限を超えています。');
     const node={tag:tag.local,attrs:{},children:[],refs:[],parent:top,depth:top?top.depth+1:1};
     for(const a of Object.values(tag.attributes)) {
       if(a.name==='xmlns'||a.name==='xmlns:xlink')continue;
       if(a.uri&&a.uri!==XLINK||a.uri===XLINK&&a.local!=='href'||!attrs.has(a.local)||/^on/i.test(a.local))fail(`SVG属性は対象外です: ${a.name}`);
       const key=a.uri===XLINK?'xlink:href':a.local;
       if(key==='href'||key==='xlink:href')node.refs.push(ref(a.value));
-      else if(key==='style')a.value=styleAttribute(a.value,node.refs);
-      else if(['fill','stroke','clip-path','mask','stop-color'].includes(key)){
-        let ast;
-        try {ast=cssTree.parse(a.value,{context:'value',onParseError:e=>{throw e;}});}catch{fail('SVGの描画属性を解析できません。');}
-        cssTree.walk(ast,child=>{
-          if(child.type==='Raw')fail('SVGの描画属性を解析できません。');
-          if(child.type==='Url')node.refs.push(ref(child.value));
-          if(child.type==='Function'&&/^(?:var|env|attr|calc)$/i.test(child.name))fail('SVGの関数は対象外です。');
-        });
-      }
+      else if(key==='style')a.value=css(a.value,'style',node.refs);
+      else if(paintAttributes.has(key))css(a.value,'paint',node.refs);
       numberCheck(a.value);
       node.attrs[key]=a.value;
     }
@@ -111,7 +107,7 @@ export function sanitizeSvg(source) {
     top=node;
   });
   parser.on('text',text=>{if(!top){if(text.trim())fail('SVGの外にテキストがあります。');return;}top.children.push(text);});
-  parser.on('cdata',text=>{if(!top||!['style','text','tspan','title','desc'].includes(top.tag))fail('SVGのCDATAは対象外です。');top.children.push(text);});
+  parser.on('cdata',text=>{if(!top||!textContainers.has(top.tag))fail('SVGのCDATAは対象外です。');top.children.push(text);});
   parser.on('closetag',()=>{top=top?.parent||null;if(!top)closed=true;});
   try {parser.write(source).close();}catch(e){if(e instanceof AppError)throw e;fail('SVGのXMLが不正です。');}
   if(!root||root.tag!=='svg'||top)fail('SVGのルートが不正です。');
@@ -120,7 +116,7 @@ export function sanitizeSvg(source) {
     if(typeof node==='string')return;
     if(node.tag==='style'){
       if(node.children.some(child=>typeof child!=='string'))fail('SVGのstyle内に要素は置けません。');
-      node.styleCss=css(node.children.join(''),node.refs);
+      node.styleCss=css(node.children.join(''),'stylesheet',node.refs);
     }
     for(const child of node.children)prepare(child);
   };
@@ -158,6 +154,6 @@ export function sanitizeSvg(source) {
     return `<${node.tag}${attributes}>${body}</${node.tag}>`;
   };
   const result=render(root).replace(/^<svg(?=[ >])/,`<svg xmlns="${SVG}" xmlns:xlink="${XLINK}"`);
-  if(utf8Size(result)>512*1024)fail('SVGの生成物が512 KiBを超えています。');
+  if(utf8Size(result)>maxBytes)fail('SVGの生成物が512 KiBを超えています。');
   return result;
 }

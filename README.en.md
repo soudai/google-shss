@@ -47,6 +47,8 @@ node --check < dist/gas/Code.gs
 
 The build produces `Code.gs`, `Index.html`, and `appsscript.json` in `dist/gas/`.
 
+`npm test` runs the tests for import sanitization and comment handling. `npm run check` runs the tests, the build and the syntax check together.
+
 ## Deploy to Apps Script
 
 1. Create a standalone project in [Apps Script](https://script.google.com/). Enable manifest visibility in Project Settings and add the three generated files. Name the HTML file `Index` in the editor.
