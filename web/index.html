@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23252627'/%3E%3Cpath d='M9 10h14v3H12v2h11v8H9v-3h11v-2H9z' fill='white'/%3E%3C/svg%3E">
+  <title>SHSS</title>
+  <style>/* STYLE */</style>
+</head>
+<body>
+  <header>
+    <button id="home" class="brand" aria-label="文書一覧">SHSS</button>
+    <span id="title"></span>
+    <span id="load-status" role="status"></span>
+    <span id="save-status" role="status"></span>
+    <button id="save-details" hidden>保存状況</button>
+    <nav aria-label="文書の操作">
+      <select id="pages" aria-label="ページ" hidden></select>
+      <button id="versions" hidden>版</button>
+      <button id="toggle" aria-controls="comments" aria-expanded="false" hidden>コメント</button>
+      <button id="preview-reload" hidden title="HTML内の操作状態をリセットします">プレビューを再読み込み</button>
+      <button id="region-toggle" aria-pressed="false" hidden aria-describedby="region-help">図にコメント</button>
+      <button id="share" hidden>URLをコピー</button>
+      <button id="import" hidden>取り込み</button>
+    </nav>
+  </header>
+  <main id="library" hidden>
+    <h1>文書</h1>
+    <input id="search" type="search" aria-label="文書を検索" placeholder="検索">
+    <button id="archive-view" aria-pressed="false">アーカイブ</button>
+    <ul id="documents"></ul>
+    <button id="more" hidden>もっと見る</button>
+  </main>
+  <main id="viewer" hidden>
+    <div id="preview" aria-label="HTMLプレビュー"></div>
+    <aside id="comments" aria-label="コメント" hidden>
+      <div class="panel-head"><strong>コメント</strong><button id="close" aria-label="コメント欄を閉じる">×</button></div>
+    <p id="region-help" role="status" hidden>画像・グラフをクリックすると図全体を選べます。一部分ならドラッグで囲んでください。選択後、右のコメント欄に入力して「投稿」を押します。Escで選択をやめられます。</p>
+      <div class="filters" role="group" aria-label="表示状態"><button id="active" aria-pressed="true">表示中</button><button id="hidden" aria-pressed="false">非表示</button><button id="reload" class="push" aria-label="コメントを更新">↻</button></div>
+      <div id="comment-status" role="status"></div>
+      <div id="threads"></div>
+      <form id="compose" hidden>
+        <blockquote id="selection"></blockquote>
+        <textarea id="body" maxlength="2000" required aria-label="コメント本文" placeholder="コメントを入力"></textarea>
+        <div class="actions"><button id="cancel" type="button">キャンセル</button><button id="submit" class="primary">投稿</button></div>
+      </form>
+    </aside>
+  </main>
+  <dialog id="save-dialog" aria-labelledby="save-title">
+    <form method="dialog" class="dialog-close"><button aria-label="閉じる">×</button></form>
+    <h2 id="save-title">保存状況</h2>
+    <p>保存中も別のページへ移動できます。未保存の内容がある場合は、このタブを開いたままにしてください。</p>
+    <ul id="save-list"></ul>
+  </dialog>
+  <dialog id="import-dialog">
+    <form id="import-form">
+      <h2 id="import-title">HTMLを取り込む</h2>
+      <label>HTML・ZIP・SVG<input id="file" type="file" accept=".html,.htm,.zip,.svg,text/html,application/zip,image/svg+xml"></label>
+      <p class="meta">ファイルを選ぶと取り込みを開始します。タイトルは取り込み中も編集できます。</p>
+      <label id="name-field">タイトル<input id="name" maxlength="160" placeholder="ファイル名を使用"></label>
+      <p id="import-status" role="status"></p>
+      <button id="import-title-retry" type="button" hidden>タイトルを再試行</button>
+      <label id="start-page-field" hidden>開始ページ<select id="start-page"></select></label>
+      <label>または Drive URL・ファイルID<input id="drive" maxlength="2048"></label>
+      <button id="source-load" type="button">管理フォルダから選ぶ</button>
+      <select id="source-list" aria-label="管理フォルダ内のHTML" hidden></select>
+      <button id="source-more" type="button" hidden>もっと見る</button>
+      <p id="import-error" role="alert"></p>
+      <div class="actions"><button id="import-cancel" type="button">キャンセル</button><button id="import-submit" class="primary">取り込む</button></div>
+    </form>
+  </dialog>
+  <dialog id="version-dialog">
+    <form method="dialog" class="dialog-close"><button aria-label="閉じる">×</button></form>
+    <h2>版</h2><ul id="version-list"></ul><button id="append" hidden>新版を取り込む</button>
+  </dialog>
+  <dialog id="share-dialog">
+    <form method="dialog" class="dialog-close"><button aria-label="閉じる">×</button></form>
+    <h2>共有URL</h2><input id="link" aria-label="共有URL" readonly>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <form method="dialog">
+      <h2 id="delete-title">このコメントを削除しますか？</h2>
+      <div class="actions"><button value="cancel" autofocus>キャンセル</button><button class="primary" value="delete">削除</button></div>
+    </form>
+  </dialog>
+  <dialog id="manage-dialog" aria-labelledby="manage-title">
+    <form id="manage-form">
+      <h2 id="manage-title">文書名を変更</h2>
+      <input id="manage-name" maxlength="160" required aria-label="文書名">
+      <div class="actions"><button id="manage-cancel" type="button">キャンセル</button><button class="primary">保存</button></div>
+    </form>
+  </dialog>
+  <div id="notice" role="status" hidden></div>
+  <script>window.SHSS_BOOT=/* BOOT */;window.SHSS_BRIDGE=/* BRIDGE */;</script>
+  <script>/* APP */</script>
+</body>
+</html>
