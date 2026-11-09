@@ -1,10 +1,15 @@
 export const pageKey=d=>JSON.stringify([d.documentId,d.versionId,d.pagePath||'index.html',d.sourceHash]);
 const requestKey=({operationId,...request})=>JSON.stringify(request);
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// A lost reply or a server error may be momentary (for example when several
+// users post at once). Resending is safe because the server applies each
+// operationId once and returns the saved result for a repeat.
+const transient=error=>!error?.code||error.code==='INTERNAL'||error.code==='BUSY';
 
 // Serialize writes while the UI remains available. Retrying preserves the exact request.
 export class CommentOutbox {
-  constructor(send,{changed=()=>{},saved=()=>{},failed=()=>{},limit=30}={}) {
-    Object.assign(this,{send,changed,saved,failed,limit});
+  constructor(send,{changed=()=>{},saved=()=>{},failed=()=>{},limit=30,retryDelays=[2000,5000],wait=sleep,random=Math.random}={}) {
+    Object.assign(this,{send,changed,saved,failed,limit,retryDelays,wait,random});
     this.entries=[];this.running=false;this.snapshots=new Map();
   }
   active(d) {return d?this.entries.filter(e=>e.state!=='failed'&&pageKey(e.request)===pageKey(d)):[];}
@@ -31,7 +36,15 @@ export class CommentOutbox {
     const entry=this.entries.find(e=>e.state==='queued');if(!entry)return;
     this.running=true;entry.state='saving';this.changed();
     try {
-      const result=await this.send(entry.request);
+      let result;
+      for(let attempt=0;;attempt++) {
+        try {result=await this.send(entry.request);break;}
+        catch(error){
+          if(!transient(error)||attempt>=this.retryDelays.length)throw error;
+          const delay=this.retryDelays[attempt];
+          await this.wait(error?.code==='BUSY'?delay*(0.5+this.random()):delay);
+        }
+      }
       if(result.status!=='applied'||result.operationId!==entry.request.operationId||!result.comments)throw new Error('保存結果を確認できません。再試行してください。');
       this.entries=this.entries.filter(e=>e!==entry);
       const key=pageKey(entry.request);this.snapshots.delete(key);

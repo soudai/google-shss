@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PreviewCache,optimisticComments} from '../web/fast-state.mjs';
 import {CommentOutbox,TitleTask,pageKey} from '../web/background.mjs';
+import {createCaller} from '../web/rpc.mjs';
 
 const doc = (extra = {}) => ({documentId: 'd', versionId: 'v', pagePath: 'index.html', pageHash: 'h', html: '<p>x</p>', comments: {threads: []}, ...extra});
 
@@ -75,7 +76,7 @@ test('CommentOutbox serializes, deduplicates and retries', async () => {
     sent.push(request.operationId);
     if (fail) throw Object.assign(new Error('nope'), {code: 'INTERNAL'});
     return {status: 'applied', operationId: request.operationId, comments: {revision: 1, threads: []}};
-  });
+  }, {retryDelays: []});
   const request = {documentId: 'd', versionId: 'v', sourceHash: 's', type: 'add', payload: {body: 'x'}, operationId: 'o1'};
   const entry = outbox.enqueue(request, {});
   await new Promise(resolve => setTimeout(resolve, 0));
@@ -88,6 +89,47 @@ test('CommentOutbox serializes, deduplicates and retries', async () => {
   assert.equal(outbox.entries.length, 0);
   assert.equal(outbox.snapshots.get(pageKey(request)).result.revision, 1);
   assert.equal(outbox.prefer(request, {revision: 0, canWrite: true, threads: []}).revision, 1);
+});
+
+test('CommentOutbox resends momentary failures with the same operationId', async () => {
+  const sent = [], waits = [];
+  const errors = [new Error('lost'), Object.assign(new Error('x'), {code: 'INTERNAL'})];
+  const outbox = new CommentOutbox(async request => {
+    sent.push(request.operationId);
+    if (errors.length) throw errors.shift();
+    return {status: 'applied', operationId: request.operationId, comments: {revision: 1, threads: []}};
+  }, {wait: async ms => {waits.push(ms);}});
+  const request = {documentId: 'd', versionId: 'v', sourceHash: 's', type: 'add', payload: {body: 'x'}, operationId: 'o1'};
+  outbox.enqueue(request, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(sent, ['o1', 'o1', 'o1']);
+  assert.deepEqual(waits, [2000, 5000]);
+  assert.equal(outbox.entries.length, 0);
+
+  // Errors that a resend cannot fix fail at once.
+  const rejected = new CommentOutbox(async () => {throw Object.assign(new Error('x'), {code: 'FORBIDDEN'});}, {wait: async () => assert.fail('no wait')});
+  const entry = rejected.enqueue({...request, operationId: 'o2'}, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(entry.state, 'failed');
+});
+
+test('a busy comment gets one retry budget across the RPC and outbox', async () => {
+  const sent = [], waits = [];
+  const call = createCaller(async (action, input) => {
+    assert.equal(action, 'submitOperation');
+    sent.push(input.operationId);
+    return {ok: false, error: {code: 'BUSY', message: 'busy', retryable: true}};
+  }, {wait: async () => assert.fail('the RPC must not retry comments')});
+  const outbox = new CommentOutbox(request => call('submitOperation', request), {
+    random: () => 0.75, wait: async ms => {waits.push(ms);}
+  });
+  const entry = outbox.enqueue({documentId: 'd', versionId: 'v', sourceHash: 's',
+    operationId: 'o1', type: 'add', payload: {body: 'x'}}, {});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(sent, ['o1', 'o1', 'o1']);
+  assert.deepEqual(waits, [2500, 6250]);
+  assert.equal(entry.state, 'failed');
+  assert.equal(entry.error.code, 'BUSY');
 });
 
 test('TitleTask coalesces renames', async () => {

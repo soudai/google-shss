@@ -100,5 +100,22 @@ test('comments still work through the Drive store', () => {
   assert.equal(ok(env.rpc('getDocument', {documentId: ids[0]})).comments.threads.length, 1);
 });
 
+test('a busy lock leaves no orphaned version and does not block new documents', () => {
+  const {env, ids} = withDocuments(1);
+  env.lockBusy = true;
+  const before = env.files.size;
+  const busy = env.rpc('appendVersion', {documentId: ids[0], html: html('<p>new</p>')});
+  assert.equal(busy.ok, false);
+  assert.equal(busy.error.code, 'BUSY');
+  assert.equal(busy.error.retryable, true);
+  // The uploaded version folder went to the trash; the document is unchanged.
+  const added = [...env.files.values()].slice(before);
+  assert.ok(added.length > 0);
+  assert.ok(added.some(f => f.trashed && f.name !== 'index.html'));
+  assert.equal(ok(env.rpc('getDocument', {documentId: ids[0]})).versions.length, 1);
+  // Importing a new document does not wait for the lock.
+  ok(env.rpc('importDocument', {title: 'New', html: html('<p>other</p>')}));
+});
+
 import {createHash} from 'node:crypto';
 function await_hash(bytes) {return createHash('sha256').update(bytes).digest('hex');}

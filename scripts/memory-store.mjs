@@ -74,6 +74,8 @@ export function memoryStore({canImport = true, canEditComments = true, canManage
     writeManifest(d, m) {
       files.get(d.manifestId).text = JSON.stringify(m);
     },
+    discarded: [],
+    discardVersion(folderId) {store.discarded.push(folderId);},
     addSource(text) {return put(text);}
   };
   return store;
@@ -81,7 +83,7 @@ export function memoryStore({canImport = true, canEditComments = true, canManage
 
 // A service over a memory store. uuid and now default to real values; tests
 // pass deterministic ones.
-export function localService({store = memoryStore(), actor = () => ({id: 'user1', displayName: 'User One'}), uuid = randomUUID, now = () => new Date().toISOString()} = {}) {
-  const run = createService({store, identity: actor, digest, uuid, now, locked: fn => fn()});
+export function localService({store = memoryStore(), actor = () => ({id: 'user1', displayName: 'User One'}), uuid = randomUUID, now = () => new Date().toISOString(), locked = fn => fn()} = {}) {
+  const run = createService({store, identity: actor, digest, uuid, now, locked});
   return {run, store};
 }

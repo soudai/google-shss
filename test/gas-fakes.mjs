@@ -100,7 +100,14 @@ export function gasEnvironment({domain = 'example.com', email = 'user@example.co
     }},
     PropertiesService: {getScriptProperties: () => ({getProperty: key => ({SHSS_ROOT_FOLDER_ID: ROOT, SHSS_DOMAIN: domain})[key] ?? null})},
     Session: {getActiveUser: () => ({getEmail: () => email}), getEffectiveUser: () => ({getEmail: () => email})},
-    LockService: {getScriptLock: () => ({tryLock: () => {env.onLock?.(); return true;}, releaseLock() {}})},
+    LockService: {getScriptLock: () => ({
+      tryLock() {
+        if (env.lockBusy) return false;
+        env.onLock?.();
+        return true;
+      },
+      releaseLock() {}
+    })},
     HtmlService: {}
   });
   vm.runInContext(bundle + '\n' + code, context);

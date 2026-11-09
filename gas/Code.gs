@@ -17,7 +17,9 @@ function toSignedBytes_(bytes) {return Array.from(bytes,b=>b>127?b-256:b);}
 
 function timestamp_() {return new Date().toISOString().replace(/[:.]/g,'-');}
 
-// Runs fn while holding the script-wide lock that serializes all writes.
+// Runs fn while holding the script-wide lock that serializes writes to shared
+// files (comments.json and manifest.json). If the lock times out, the
+// callback has not run. A caller may already have staged files outside it.
 function withScriptLock_(fn, busy) {
   const lock=LockService.getScriptLock();
   if(!lock.tryLock(LOCK_TIMEOUT_MS_))throw busy();
@@ -413,7 +415,11 @@ function driveStore_(root) {
       }
       return {versionId,folderId,startPage:pkg.startPage,files,pages,...(files.some(f=>f.mime==='image/svg+xml')?{svgPolicyVersion:SHSSCore.SVG_POLICY_VERSION}:{})};
     },
-    writeManifest: (d,m)=>write(d.manifestId,'application/json',JSON.stringify(m))
+    writeManifest: (d,m)=>write(d.manifestId,'application/json',JSON.stringify(m)),
+    // Trashes a version folder that was never recorded in the manifest.
+    discardVersion(folderId) {
+      if(idOk(folderId))Drive.Files.update({trashed:true},folderId,null,{fields:'id',supportsAllDrives:true});
+    }
   };
 }
 

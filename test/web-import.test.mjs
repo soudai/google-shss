@@ -120,8 +120,30 @@ test('ImportQueue retries known failures but never resends unknown outcomes', as
 });
 
 test('createCaller maps replies to values and errors', async () => {
-  const call = createCaller(async (action, input) => action === 'ok' ? {ok: true, value: input} : action === 'fail' ? {ok: false, error: {code: 'BUSY', message: 'm', retryable: true}} : Promise.reject(new Error('x')));
+  const call = createCaller(async (action, input) => action === 'ok' ? {ok: true, value: input} : action === 'fail' ? {ok: false, error: {code: 'BUSY', message: 'm', retryable: true}} : Promise.reject(new Error('x')), {busyDelays: []});
   assert.deepEqual(await call('ok', {a: 1}), {a: 1});
   await assert.rejects(call('fail'), e => e.code === 'BUSY' && e.retryable === true && e.message === 'm');
   await assert.rejects(call('lost'), e => e.code === undefined && /通信/.test(e.message));
+});
+
+test('createCaller resends BUSY replies with jittered backoff', async () => {
+  const waits = [];
+  let calls = 0;
+  const busy = {ok: false, error: {code: 'BUSY', message: 'm', retryable: true}};
+  const options = {busyDelays: [100, 200], random: () => 0.5, wait: async ms => {waits.push(ms);}};
+  const call = createCaller(async () => ++calls < 3 ? busy : {ok: true, value: calls}, options);
+  assert.equal(await call('manageDocument'), 3);
+  assert.deepEqual(waits, [100, 200]);
+  // Gives up after the last delay; other errors are not resent.
+  calls = 0;
+  const always = createCaller(async () => {calls++; return busy;}, options);
+  await assert.rejects(always('manageDocument'), e => e.code === 'BUSY');
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(always('appendVersion'), e => e.code === 'BUSY');
+  assert.equal(calls, 1, 'never resends a version upload automatically');
+  calls = 0;
+  const denied = createCaller(async () => {calls++; return {ok: false, error: {code: 'FORBIDDEN', message: 'no'}};}, options);
+  await assert.rejects(denied('manageDocument'), e => e.code === 'FORBIDDEN');
+  assert.equal(calls, 1);
 });
