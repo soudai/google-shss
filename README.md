@@ -49,7 +49,15 @@ node --check < dist/gas/Code.gs
 
 `dist/gas/` に `Code.gs`、`Index.html`、`appsscript.json` が生成されます。
 
-`npm test` で、取り込み時の安全検査とコメント処理のテストを実行できます。`npm run check` は、テスト、ビルド、構文確認をまとめて実行します。
+`npm test` で、取り込み時の安全検査、コメント処理、Drive 読み込み、画面操作のテストを実行できます。`npm run check` は、テスト、ビルド、構文確認をまとめて実行します。
+
+### ローカルで動かす
+
+```sh
+npm run dev
+```
+
+http://localhost:8080/ で、Apps Script にデプロイせずに画面を確認できます。保存先は Google Drive ではなくメモリ上の仮の領域で、サーバーを止めると内容は消えます。`web/` の変更はページの再読み込みで、`server/` と `scripts/` の変更はサーバーの自動再起動で反映されます。`SHSS_DEV_DELAY=800 npm run dev` のように指定すると、各通信に遅延（ミリ秒）を加えて遅い回線を再現できます。
 
 ## Apps Script にデプロイ
 

@@ -33,8 +33,8 @@ export function createImportDialog(app) {
     ...job.input, ...(job.target ? {documentId: job.target} : {title: job.title})
   }), {changed: () => {app.changed(); render();}, finished});
 
+  // Opening the dialog keeps cached previews; they are dropped when an import finishes.
   function show(target = null) {
-    app.documentsChanged();
     clearTimeout(titleTimer);
     session = {target, phase: 'idle', prepared: null, job: null, autoTitle: ''};
     $('import-form').reset();

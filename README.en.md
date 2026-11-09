@@ -51,7 +51,15 @@ node --check < dist/gas/Code.gs
 
 The build produces `Code.gs`, `Index.html`, and `appsscript.json` in `dist/gas/`.
 
-`npm test` runs the tests for import sanitization and comment handling. `npm run check` runs the tests, the build and the syntax check together.
+`npm test` runs the tests for import sanitization, comment handling, Drive reads and the viewer UI. `npm run check` runs the tests, the build and the syntax check together.
+
+### Run locally
+
+```sh
+npm run dev
+```
+
+Open http://localhost:8080/ to try the viewer without deploying to Apps Script. Documents are stored in memory instead of Google Drive and are lost when the server stops. Changes under `web/` appear when you reload the page; changes under `server/` and `scripts/` restart the server automatically. To simulate a slow network, add a delay in milliseconds to every request, for example `SHSS_DEV_DELAY=800 npm run dev`.
 
 ## Deploy to Apps Script
 
