@@ -77,6 +77,22 @@ test('an import continues in the background and can be opened from the notice', 
   v.close();
 });
 
+test('closing and reopening the import dialog preserves an edited title', async t => {
+  const v = await viewer();
+  t.after(v.close);
+  const {$, text, until} = v;
+  $('import').click();
+  v.chooseFile('old.html', html('<p>Title update</p>'));
+  await until(() => text('import-submit') === '文書を開く', 'imported');
+  $('name').value = 'Latest title';
+  $('name').dispatchEvent(new v.window.Event('input'));
+  $('import-cancel').click();
+  $('import').click();
+  await until(() => text('save-status') === '' && text('documents').includes('Latest title'), 'title saved');
+  assert.equal(v.rpcCount('importDocument'), 1);
+  assert.deepEqual(v.errors, []);
+});
+
 test('a ZIP is checked in the browser and uploaded once', async () => {
   const v = await viewer();
   const {$, text, until} = v;
@@ -87,7 +103,8 @@ test('a ZIP is checked in the browser and uploaded once', async () => {
   $('start-page').value = 'b.html';
   $('start-page').dispatchEvent(new v.window.Event('change'));
   await until(() => text('import-submit') === '文書を開く', 'done in dialog');
-  assert.deepEqual(v.calls.map(c => c.action), ['listDocuments', 'importDocument']);
+  assert.equal(v.rpcCount('inspectPackage'), 0);
+  assert.equal(v.rpcCount('importDocument'), 1);
   $('import-submit').click();
   await until(() => $('pages').value === 'b.html', 'opened at start page');
 

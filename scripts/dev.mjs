@@ -7,10 +7,12 @@
 import {createServer} from 'node:http';
 import {buildPage} from './bundle.mjs';
 import {localService} from './memory-store.mjs';
+import {maxImportBytes} from '../server/limits.mjs';
 
 const port = Number(process.env.PORT) || 8080;
 const delay = Number(process.env.SHSS_DEV_DELAY) || 0;
 const {run} = localService();
+const maxRequestBytes = 6 * maxImportBytes + 8192;
 
 run('importDocument', {title: 'サンプル文書', html: `<!doctype html><html lang="ja"><meta charset="utf-8"><title>サンプル</title>
 <h1>四半期レポート</h1><p>この文章を選択して、コメントを投稿してください。</p>
@@ -41,8 +43,20 @@ createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost');
     if (request.method === 'POST' && url.pathname === '/rpc') {
+      if (request.headers['content-type'] !== 'application/json') {
+        response.writeHead(415).end();
+        return;
+      }
       const chunks = [];
-      for await (const chunk of request) chunks.push(chunk);
+      let size = 0;
+      for await (const chunk of request) {
+        size += chunk.length;
+        if (size > maxRequestBytes) {
+          response.writeHead(413).end();
+          return;
+        }
+        chunks.push(chunk);
+      }
       const {action, input} = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       response.writeHead(200, {'content-type': 'application/json; charset=utf-8'});

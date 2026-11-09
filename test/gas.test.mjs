@@ -22,6 +22,7 @@ test('the document list downloads manifests in one parallel request', () => {
   assert.equal(listed.documents.length, 5);
   assert.equal(env.counts.fetchAll, 1);
   assert.equal(env.counts.fetched, 5);
+  assert.equal(env.unsafeRequest, undefined);
   assert.equal(env.counts.driveAppReads, 0);
 
   // The manifests are now cached: the next list needs no download at all.
@@ -57,6 +58,14 @@ test('falls back to one-by-one reads when parallel download fails', () => {
   env.clearCache();
   const doc = ok(env.rpc('getDocument', {documentId: ids[0]}));
   assert.match(doc.html, /doc 0/);
+});
+
+test('redirects fall back to Drive reads', () => {
+  const {env} = withDocuments(2);
+  env.redirectDownloads = true;
+  assert.equal(ok(env.rpc('listDocuments', {})).documents.length, 2);
+  assert.equal(env.counts.fetchAll, 1);
+  assert.equal(env.counts.driveAppReads, 2);
 });
 
 test('downloads that do not match the Drive checksum are not used', () => {

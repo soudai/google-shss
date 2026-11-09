@@ -33,9 +33,15 @@ export function createImportDialog(app) {
     ...job.input, ...(job.target ? {documentId: job.target} : {title: job.title})
   }), {changed: () => {app.changed(); render();}, finished});
 
+  function flushTitle() {
+    clearTimeout(titleTimer);
+    const task = session?.job?.titleTask;
+    if (task?.pending && !task.error) void task.flush();
+  }
+
   // Opening the dialog keeps cached previews; they are dropped when an import finishes.
   function show(target = null) {
-    clearTimeout(titleTimer);
+    flushTitle();
     session = {target, phase: 'idle', prepared: null, job: null, autoTitle: ''};
     $('import-form').reset();
     $('start-page-field').hidden = true;
@@ -95,8 +101,8 @@ export function createImportDialog(app) {
       app.documentsChanged();
       if (!job.target) startTitleTask(job);
       queue.dismiss(job);
+      if (app.isLibraryVisible()) app.library();
       if (!inDialog) {
-        if (app.isLibraryVisible()) app.library();
         app.notify('「' + job.label + '」を取り込みました。', {label: '開く', run: () => openImported(job)});
       }
     } else if (!inDialog) {
@@ -175,6 +181,8 @@ export function createImportDialog(app) {
     if (job && (job.state === 'queued' || job.state === 'uploading')) app.notify('取り込みをバックグラウンドで続けます。完了するとお知らせします。');
   };
   dialog.addEventListener('close', () => {
+    if (dialog.open) return;
+    flushTitle();
     // A file still being read is abandoned; nothing was sent yet.
     if (session && !session.job) session = null;
   });

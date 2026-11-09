@@ -79,14 +79,18 @@ export function gasEnvironment({domain = 'example.com', email = 'user@example.co
     UrlFetchApp: {fetchAll(requests) {
       counts.fetchAll++;
       if (env.fetchAllFails) throw new Error('Exception: Request failed');
-      return requests.map(({url, headers}) => {
+      return requests.map(({url, headers, followRedirects}) => {
         counts.fetched++;
+        if (!url.startsWith('https://www.googleapis.com/drive/v3/files/') || followRedirects !== false) {
+          env.unsafeRequest = true;
+          throw new Error('OAuth request must stay on the Drive API');
+        }
         const id = decodeURIComponent(url.match(/files\/([^?]+)\?alt=media/)[1]);
         const f = files.get(id);
         const ok = f && headers.Authorization === 'Bearer token-1';
         let bytes = ok ? f.content : Buffer.from('not found');
         if (ok && env.corruptDownloads) bytes = Buffer.concat([bytes.subarray(0, -1), Buffer.from('!')]);
-        return {getResponseCode: () => ok ? 200 : 404, getContent: () => signed(bytes), getContentText: () => bytes.toString('utf8')};
+        return {getResponseCode: () => env.redirectDownloads ? 302 : ok ? 200 : 404, getContent: () => signed(bytes), getContentText: () => bytes.toString('utf8')};
       });
     }},
     PropertiesService: {getScriptProperties: () => ({getProperty: key => ({SHSS_ROOT_FOLDER_ID: ROOT, SHSS_DOMAIN: domain})[key] ?? null})},

@@ -190,6 +190,7 @@ function driveStore_(root) {
       }catch(e){console.warn('File cache unavailable');}
     }
     const pending=unique.filter(f=>f.capabilities?.canDownload===true&&Number(f.size)<=PARALLEL_MAX_BYTES_
+      &&/^[a-f0-9]{64}$/i.test(f.sha256Checksum||'')
       &&!downloads.has(f.id)&&!(cacheable(f)&&cachedTexts.has(cacheKey(f))));
     // One file gains nothing from a parallel request.
     if(pending.length<2)return;
@@ -198,16 +199,20 @@ function driveStore_(root) {
       const authorization='Bearer '+ScriptApp.getOAuthToken();
       responses=UrlFetchApp.fetchAll(pending.map(f=>({
         url:'https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(f.id)+'?alt=media&supportsAllDrives=true',
-        headers:{Authorization:authorization},muteHttpExceptions:true,followRedirects:true
+        headers:{Authorization:authorization},muteHttpExceptions:true,followRedirects:false
       })));
     }catch(e){console.warn('Parallel download unavailable');return;}
     responses.forEach((response,i)=>{
       const file=pending[i];
-      if(response.getResponseCode()!==200)return;
-      const bytes=response.getContent(),sha256=sha256Hex(bytes);
-      // Use only what matches the metadata read in this request.
-      if(bytes.length!==Number(file.size)||file.sha256Checksum&&file.sha256Checksum.toLowerCase()!==sha256)return;
-      downloads.set(file.id,{version:file.version,size:bytes.length,sha256,text:response.getContentText('UTF-8')});
+      try {
+        if(response.getResponseCode()!==200)return;
+        const bytes=response.getContent();
+        if(bytes.length!==Number(file.size))return;
+        const sha256=sha256Hex(bytes);
+        // The version used for caching must match the downloaded bytes.
+        if(file.sha256Checksum.toLowerCase()!==sha256)return;
+        downloads.set(file.id,{version:file.version,size:bytes.length,sha256,text:response.getContentText('UTF-8')});
+      }catch(e){console.warn('Parallel response unavailable');}
     });
   }
   // Small files are cached per user for 5 minutes, keyed by Drive file version.
@@ -272,7 +277,11 @@ function driveStore_(root) {
       for(const file of files)metadata.set(file.id,file);
       prepareDocuments(ids);
       // Manifest metadata came from the prefetch above; no extra Drive calls here.
-      preloadFiles(files.map(f=>metadata.get(f.appProperties?.manifest)).filter(Boolean));
+      preloadFiles(files.flatMap(f=>{
+        const manifest=metadata.get(f.appProperties?.manifest);
+        return child(manifest,f.id,'application/json')&&manifest.name==='manifest.json'
+          &&Number(manifest.size)<=MAX_JSON_BYTES_?[manifest]:[];
+      }));
       return {ids,cursor:page.nextPageToken||null};
     },
     findDocument(id) {
