@@ -60,6 +60,16 @@ export class PreviewCache {
       entry.value.comments=null;entry.value.commentsError={message:'コメントを更新中…'};
     }
   }
+  // Keeps the pages but treats everything else as out of date: comments are
+  // dropped and requests in flight will not be stored. request() always asks
+  // the server, sending the cached page hash, so an unchanged page is not sent
+  // again while anything newer replaces the cached copy.
+  markStale() {
+    this.epoch++;this.requests.clear();
+    for(const entry of this.entries.values()){
+      entry.value.comments=null;entry.value.commentsError={message:'コメントを更新中…'};
+    }
+  }
   clear() {
     this.epoch++;this.entries.clear();this.requests.clear();
   }

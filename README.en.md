@@ -65,9 +65,9 @@ The build produces `Code.gs`, `Index.html`, and `appsscript.json` in `dist/gas/`
    | `SHSS_DOMAIN` | The Google Workspace email domain for your users, such as `example.com`. |
 
 4. Create a [new web app deployment](https://developers.google.com/apps-script/guides/web). Set **Execute as** to **User accessing the web app** and limit access to **users in your domain**.
-5. Open the generated `/exec` URL with an account in that domain and grant access to Google Drive and your email address when prompted.
+5. Open the generated `/exec` URL with an account in that domain and grant access to Google Drive, your email address, and external connections when prompted. External connections are used to read several Drive files in parallel; the app connects only to `www.googleapis.com`.
 
-To update the app, replace the generated files and assign a new version to the existing deployment under **Manage deployments**. The existing `/exec` URL will continue to work.
+To update the app, replace the generated files and assign a new version to the existing deployment under **Manage deployments**. The existing `/exec` URL will continue to work. When an update adds permissions to the manifest, each user is asked to grant them the next time they open the app.
 
 ## Try it
 

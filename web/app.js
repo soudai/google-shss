@@ -457,9 +457,15 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     dropFrame();mountPreview(current);
     notify('プレビューを再読み込みしました。HTML内の操作状態をリセットしました。');
   };
+  // Data may change while the tab is hidden. Cached pages are kept but marked
+  // stale (every later open asks the server, which skips unchanged HTML), and
+  // the visible view is refreshed on return.
+  let hiddenAt=0;
   document.addEventListener('visibilitychange',()=>{
-    if(document.hidden){clearTimeout(pollTimer);clearTimeout(prefetchTimer);prefetchQueue=[];previews.clear();}
-    else if(current?.canReadComments)refresh();
+    if(document.hidden){hiddenAt=Date.now();clearTimeout(pollTimer);clearTimeout(prefetchTimer);prefetchQueue=[];previews.markStale();return;}
+    if(current?.canReadComments)refresh();
+    // A short switch does not reload the list, which would drop extra pages loaded with "more".
+    else if(!$('library').hidden&&Date.now()-hiddenAt>=30000)library();
   });
   $('share').onclick=async()=>{
     if(!current)return;

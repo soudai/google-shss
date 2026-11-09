@@ -7,6 +7,8 @@ const MAX_JSON_BYTES_=1024*1024;
 const LOCK_TIMEOUT_MS_=7000;
 // CacheService values are limited to 100 KB.
 const CACHE_MAX_BYTES_=80000;
+// Largest file downloaded in parallel; UrlFetchApp responses are limited to 50 MB.
+const PARALLEL_MAX_BYTES_=10*1024*1024;
 
 function isDriveId_(id) {return typeof id==='string'&&/^[\w-]{1,128}$/.test(id);}
 
@@ -138,42 +140,75 @@ function driveStore_(root) {
     const parents=pending.map(id=>"'"+id+"' in parents").join(' or ');
     prefetch(["("+parents+") and (name = 'manifest.json' or name = 'comments.json' or name = 'versions')"]);
   }
-  // Reads a file as strict UTF-8: the bytes must hash the same as the decoded text re-encoded.
-  function blobText(file, max) {
+  const sha256Hex=bytes=>hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes));
+  // Contents fetched in parallel by preloadFiles, by file ID. Each is used once.
+  const downloads=new Map();
+  // Returns {text, sha256} where sha256 is the hash of the bytes as stored.
+  function download(file, max) {
     if(!file?.capabilities?.canDownload)forbidden();
     if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+    const ready=downloads.get(file.id);
+    if(ready&&ready.version===file.version) {
+      downloads.delete(file.id);
+      if(ready.size>max)fail('TOO_LARGE','ファイルが上限を超えています。');
+      return ready;
+    }
     let blob;
     try {blob=DriveApp.getFileById(file.id).getBlob();}catch(e){if(unavailable(e))forbidden();throw e;}
     const bytes=blob.getBytes();
     if(bytes.length>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    const text=blob.getDataAsString('UTF-8');
-    if(hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes))!==digest_(text))fail('INVALID_DATA','UTF-8のファイルを指定してください。');
+    return {text:blob.getDataAsString('UTF-8'),sha256:sha256Hex(bytes)};
+  }
+  // Reads a file as strict UTF-8: the bytes must hash the same as the decoded text re-encoded.
+  function blobText(file, max) {
+    const {text,sha256}=download(file,max);
+    if(sha256!==digest_(text))fail('INVALID_DATA','UTF-8のファイルを指定してください。');
     return text;
   }
   // Reads a stored page and returns the SHA-256 of its bytes. Pages were written
   // by this app from valid strings, so when the hash matches the recorded page
   // hash, the bytes are known to be valid UTF-8 and need no second check.
   function blobTextWithHash(file, max) {
-    if(!file?.capabilities?.canDownload)forbidden();
-    if(Number(file.size)>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    let blob;
-    try {blob=DriveApp.getFileById(file.id).getBlob();}catch(e){if(unavailable(e))forbidden();throw e;}
-    const bytes=blob.getBytes();
-    if(bytes.length>max)fail('TOO_LARGE','ファイルが上限を超えています。');
-    return {text:blob.getDataAsString('UTF-8'),sha256:hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,bytes))};
+    const {text,sha256}=download(file,max);
+    return {text,sha256};
   }
   const cacheable=file=>!!file?.version&&Number(file.size)<=CACHE_MAX_BYTES_&&file.capabilities?.canDownload===true;
   const cacheKey=file=>'file-text:'+digest_(file.id+':'+file.version);
-  // Texts loaded in bulk by preloadTexts, keyed like the user cache.
-  const preloaded=new Map();
-  // Fetches many cached files in one CacheService call instead of one call each.
-  function preloadTexts(files) {
-    const keys=[...new Set(files.filter(cacheable).map(cacheKey))].filter(key=>!preloaded.has(key));
-    if(!keys.length)return;
+  // Texts loaded in bulk from the user cache by preloadFiles, keyed like the cache.
+  const cachedTexts=new Map();
+  // Loads several files at once: cached texts in one CacheService call, and the
+  // rest downloaded in parallel. Later reads use the results. This is only an
+  // optimization; anything not loaded here is read one by one as before, which
+  // also reports any error.
+  function preloadFiles(files) {
+    const unique=[...new Map(files.filter(f=>idOk(f?.id)).map(f=>[f.id,f])).values()];
+    const keys=[...new Set(unique.filter(cacheable).map(cacheKey))].filter(key=>!cachedTexts.has(key));
+    if(keys.length) {
+      try {
+        const found=CacheService.getUserCache().getAll(keys);
+        for(const key of Object.keys(found))cachedTexts.set(key,found[key]);
+      }catch(e){console.warn('File cache unavailable');}
+    }
+    const pending=unique.filter(f=>f.capabilities?.canDownload===true&&Number(f.size)<=PARALLEL_MAX_BYTES_
+      &&!downloads.has(f.id)&&!(cacheable(f)&&cachedTexts.has(cacheKey(f))));
+    // One file gains nothing from a parallel request.
+    if(pending.length<2)return;
+    let responses;
     try {
-      const found=CacheService.getUserCache().getAll(keys);
-      for(const key of Object.keys(found))preloaded.set(key,found[key]);
-    }catch(e){console.warn('File cache unavailable');}
+      const authorization='Bearer '+ScriptApp.getOAuthToken();
+      responses=UrlFetchApp.fetchAll(pending.map(f=>({
+        url:'https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(f.id)+'?alt=media&supportsAllDrives=true',
+        headers:{Authorization:authorization},muteHttpExceptions:true,followRedirects:true
+      })));
+    }catch(e){console.warn('Parallel download unavailable');return;}
+    responses.forEach((response,i)=>{
+      const file=pending[i];
+      if(response.getResponseCode()!==200)return;
+      const bytes=response.getContent(),sha256=sha256Hex(bytes);
+      // Use only what matches the metadata read in this request.
+      if(bytes.length!==Number(file.size)||file.sha256Checksum&&file.sha256Checksum.toLowerCase()!==sha256)return;
+      downloads.set(file.id,{version:file.version,size:bytes.length,sha256,text:response.getContentText('UTF-8')});
+    });
   }
   // Small files are cached per user for 5 minutes, keyed by Drive file version.
   function readCachedText(file,max) {
@@ -182,7 +217,7 @@ function driveStore_(root) {
     if(!cacheable(file)) return blobText(file,max);
     let cache;
     const key=cacheKey(file);
-    if(preloaded.has(key))return preloaded.get(key);
+    if(cachedTexts.has(key))return cachedTexts.get(key);
     try {
       cache=CacheService.getUserCache();
       const cached=cache.get(key);
@@ -205,7 +240,8 @@ function driveStore_(root) {
   }
   function canAdd(id) {const f=meta(id);return f?.mimeType===folder && f.capabilities?.canAddChildren===true;}
   return {
-    clearMetadata() {metadata.clear();preparedDocuments.clear();preloaded.clear();},
+    clearMetadata() {metadata.clear();preparedDocuments.clear();cachedTexts.clear();downloads.clear();},
+    preloadFiles,
     prefetchVersions(refs) {
       const clauses=new Set();
       for(const {versionsFolderId,v,page} of refs){
@@ -236,7 +272,7 @@ function driveStore_(root) {
       for(const file of files)metadata.set(file.id,file);
       prepareDocuments(ids);
       // Manifest metadata came from the prefetch above; no extra Drive calls here.
-      preloadTexts(files.map(f=>metadata.get(f.appProperties?.manifest)).filter(Boolean));
+      preloadFiles(files.map(f=>metadata.get(f.appProperties?.manifest)).filter(Boolean));
       return {ids,cursor:page.nextPageToken||null};
     },
     findDocument(id) {

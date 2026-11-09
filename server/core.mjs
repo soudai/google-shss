@@ -307,7 +307,10 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       const d=document(input.documentId),ref=version(d,input.versionId,input.pagePath),{v}=ref;
       // The client already holds this page; skip sending it again.
       const htmlUnchanged=input.cachedPageHash===ref.pageHash&&ref.file.sha256Checksum?.toLowerCase()===ref.pageHash;
-      const html=verifyHtml(ref,!htmlUnchanged),file=commentFile(d);
+      const file=commentFile(d);
+      // Lets the store fetch the page and the comments at the same time.
+      store.preloadFiles?.([...(htmlUnchanged?[]:[ref.file]),...(file?[file.meta]:[])]);
+      const html=verifyHtml(ref,!htmlUnchanged);
       let comments=null,commentsError=null;
       if(file) {
         try {comments=state(d,file,true);}

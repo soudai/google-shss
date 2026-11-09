@@ -31,6 +31,30 @@ test('PreviewCache expires, evicts and hides stale comments', () => {
   assert.equal(cache.peek({documentId: 'd', versionId: 'c'}), null);
 });
 
+test('PreviewCache.markStale keeps pages but revalidates them', async () => {
+  const calls = [];
+  let release;
+  const cache = new PreviewCache(input => {
+    calls.push(input);
+    return calls.length === 1 ? Promise.resolve(doc()) : new Promise(resolve => {release = resolve;});
+  });
+  await cache.request({documentId: 'd'});
+  // A request in flight when the tab is hidden must not be stored afterwards.
+  const pending = cache.request({documentId: 'd'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  cache.markStale();
+  const kept = cache.peek({documentId: 'd'});
+  assert.equal(kept.html, '<p>x</p>');
+  assert.equal(kept.comments, null);
+  release({...doc(), comments: {threads: ['old']}});
+  await pending;
+  assert.equal(cache.peek({documentId: 'd'}).comments, null);
+  // The next open asks the server with the cached hash, so unchanged HTML is not resent.
+  cache.request({documentId: 'd'});
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(calls[2].cachedPageHash, 'h');
+});
+
 test('optimisticComments applies pending operations', () => {
   const base = [{id: 't1', status: 'open', messages: [{id: 'm1', operationId: 'o1', body: 'a'}]}];
   const added = optimisticComments(base, {type: 'add', operationId: 'o2', payload: {anchor: {}, body: ' hi '}});
