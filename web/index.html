@@ -29,7 +29,10 @@
     <h1>文書</h1>
     <input id="search" type="search" aria-label="文書を検索" placeholder="検索">
     <button id="archive-view" aria-pressed="false">アーカイブ</button>
-    <ul id="documents"></ul>
+    <button id="library-refresh">再読み込み</button>
+    <p id="library-error" role="alert" hidden></p>
+    <a id="library-authorize" target="_blank" rel="noopener noreferrer" hidden>アクセスを許可</a>
+    <ul id="documents" aria-live="polite"></ul>
     <button id="more" hidden>もっと見る</button>
   </main>
   <main id="viewer" hidden>

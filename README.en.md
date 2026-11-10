@@ -41,6 +41,20 @@ Previously fetched pages display from the current tab's memory cache. When recen
 
 Large preview HTML is transferred with gzip compression. Drive reads are grouped, and comment saves check current permissions, the file version and checksum inside the write lock before reusing cached JSON. Initial loads and confirmed saves still depend on Apps Script, Drive and network latency; completion within one second is not guaranteed.
 
+## Document library, search, and archives
+
+The library shows previously fetched results while refreshing them. Search continues through later pages, including empty intermediate pages. Loading and connection failures are shown separately from an empty result. Use **再読み込み** (Reload) to refresh the library.
+
+The normal library skips manifest downloads and version lookups for documents with a verified archive hint. Open **アーカイブ** (Archives) to view archived documents and choose **戻す** (Restore) to return them to the normal library. Archiving organizes the library; it does not revoke sharing. Existing version links and comments remain available.
+
+If required permissions were not selected during authorization, SHSS shows **アクセスを許可** (Authorize access) before loading documents. Review and grant the Google Drive and account information permissions, return to SHSS, and select **再読み込み** (Reload).
+
+### Upgrading existing documents
+
+Imports and manifest updates, including archive and restore operations, save the archive hint together with the manifest. Older documents remain compatible, but manifests without a hint must be read to determine their archive state.
+
+To apply the optimization to existing archives, the storage administrator should run **indexDocumentArchives_** in the Apps Script editor. Each run processes up to 20 documents. Repeat until the execution log reports `hasMore: false`. If `skipped` is nonzero, check that the administrator can edit the documents. This updates library metadata only; it leaves HTML, comments, and manifest contents unchanged. Each separately deployed domain needs its own Apps Script update and redeployment before running this migration.
+
 ## Requirements
 
 - A Google Workspace account with access to Apps Script and Google Drive

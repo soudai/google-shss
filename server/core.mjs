@@ -55,7 +55,7 @@ function validVersion(v) {
     && (!v.packageHash||hash(v.packageHash)) && (!v.sourceFileId||token(v.sourceFileId)) && (!v.sourceVersion||str(v.sourceVersion,128))
     && (v.pages===undefined ? token(v.htmlFileId) : validPackage(v));
 }
-function validateManifest(m, id) {
+export function validateManifest(m, id) {
   if (!plain(m) || ![1,2].includes(m.schemaVersion) || m.documentId!==id || !str(m.title,160) || !token(m.commentsFileId) || !token(m.versionsFolderId)
     || !Array.isArray(m.versions) || !m.versions.length || m.versions.length>MAX_VERSIONS || !m.versions.every(validVersion)
     || (m.schemaVersion===1&&m.versions.some(v=>v.pages!==undefined)) || !unique(m.versions,'versionId')
@@ -289,7 +289,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     listDocuments(input) {
       if(!optional(input.cursor,c=>str(c,4096))) invalid();
       if(!optional(input.archived,a=>typeof a==='boolean'))invalid();
-      const {ids,cursor}=store.listDocuments(input.cursor);
+      const {ids,cursor}=store.listDocuments(input.cursor,{archived:!!input.archived});
       // Documents the caller cannot read, or that are damaged, are left out of the list.
       const readable=fn=>{
         try {return fn();}

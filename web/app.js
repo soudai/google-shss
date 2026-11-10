@@ -145,6 +145,17 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     dropFrame();clearTimeout(pollTimer);commentRequest++;revision=null;commentVersion=null;commentEpoch=null;pollDelay=15000;setRegionMode(false);current=null;threads=[];confirmedThreads=[];selected=null;draft=null;filter='open';replyId=null;found=null;
     $('body').value='';$('compose').hidden=true;$('comment-status').textContent='';panel(false);
   }
+  let libraryRequest=0,libraryError=null;
+  const libraryBusy=()=>libraryRequest===generation;
+  function authorizationLink(error) {
+    if(error?.code!=='AUTH_REQUIRED')return null;
+    try {
+      const url=new URL(error.authorizationUrl);
+      if(url.origin!=='https://accounts.google.com'||url.username||url.password)return null;
+      const link=create('a','アクセスを許可');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+      return link;
+    }catch{return null;}
+  }
   function renderLibrary() {
     const query=$('search').value.trim().toLocaleLowerCase();
     const rows=libraryDocuments.filter(d=>d.title.toLocaleLowerCase().includes(query)).sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt));
@@ -167,31 +178,64 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
       }
       return li;
     }));
-    if(!rows.length&&!cursor)$('documents').append(create('li',query?'一致する文書はありません。':'文書がありません。'));
-    queuePreviews(rows.slice(0,2).map(d=>({documentId:d.documentId,versionId:d.latestVersionId})));
+    if(!rows.length&&!libraryError){
+      const message=libraryBusy()||cursor?(query?'文書を検索中…':'文書を読み込み中…'):
+        query?'一致する文書はありません。':archiveView?'アーカイブした文書はありません。':'表示できる文書がありません。文書の取り込みとDriveの共有権限を確認してください。';
+      $('documents').append(create('li',message,'meta'));
+    }
+    $('library-error').hidden=!libraryError;$('library-error').textContent=libraryError?.message||'';
+    const link=authorizationLink(libraryError),authorize=$('library-authorize');
+    authorize.hidden=!link;
+    if(link)authorize.href=link.href;else authorize.removeAttribute('href');
+    $('more').hidden=!cursor;$('more').disabled=libraryBusy();
+    $('library-refresh').disabled=libraryBusy();
+    $('load-status').textContent=libraryBusy()?(query?'検索中…':libraryDocuments.length?'更新中…':'読み込み中…'):'';
+    if(!libraryBusy()&&!libraryError)queuePreviews(rows.slice(0,2).map(d=>({documentId:d.documentId,versionId:d.latestVersionId})));
   }
   // The last first page of each list, shown at once while a fresh copy loads.
   const libraryCache=new Map();
   // Drops cached previews and lists after a title, version or archive change.
   function documentsChanged() {previews.clear();libraryCache.clear();}
   async function library(more=false) {
+    if(more&&(!cursor||libraryBusy()))return;
     const ticket=++generation,view=archiveView;
+    libraryRequest=ticket;libraryError=null;
     if(!more){
-      clean();$('library').hidden=false;$('viewer').hidden=true;$('title').textContent='';cursor=null;
+      clean();$('library').hidden=false;$('viewer').hidden=true;$('title').textContent='';
       const cached=libraryCache.get(view);
-      libraryDocuments=cached?[...cached.documents]:[];bar(false,cached?.canImport);
-      if(cached)renderLibrary();else $('documents').replaceChildren(create('li','読み込み中…','meta'));
-      $('load-status').textContent=cached?'更新中…':'';$('more').hidden=true;
+      cursor=cached?.cursor||null;libraryDocuments=cached?[...cached.documents]:[];bar(false,cached?.canImport);
     }
-    $('more').disabled=true;
+    renderLibrary();
+    let next=more?cursor:null,first=true;
+    const seen=new Set();
     try {
-      const page=await call('listDocuments',{...(cursor?{cursor}:{}),archived:view});
-      if(ticket!==generation)return;
-      if(!more){libraryDocuments=[];libraryCache.set(view,page);}
-      cursor=page.cursor;bar(false,page.canImport);$('more').hidden=!cursor;
-      libraryDocuments.push(...page.documents);renderLibrary();
-    }catch(e){if(ticket===generation)notify(e.message);}
-    finally {if(ticket===generation){$('more').disabled=false;$('load-status').textContent='';}}
+      do {
+        if(ticket!==generation)return;
+        if(next&&seen.has(next))throw new Error('一覧の続きが取得できませんでした。再読み込みしてください。');
+        if(next)seen.add(next);
+        const page=await call('listDocuments',{...(next?{cursor:next}:{}),archived:view});
+        if(ticket!==generation)return;
+        if(first&&!more)libraryDocuments=[];
+        first=false;cursor=page.cursor||null;bar(false,page.canImport);
+        // A concurrent import can shift page boundaries. Never show duplicates.
+        const merged=new Map(libraryDocuments.map(d=>[d.documentId,d]));
+        for(const d of page.documents)merged.set(d.documentId,d);
+        libraryDocuments=[...merged.values()];
+        if(!more)libraryCache.set(view,{documents:[...libraryDocuments],cursor,canImport:page.canImport});
+        renderLibrary();next=cursor;
+        // Empty Drive pages and pages containing only archives are not the end.
+        // Search continues through the remaining pages while showing matches.
+      }while(cursor&&($('search').value.trim()||!libraryDocuments.length));
+    }catch(e){
+      if(ticket===generation){
+        libraryError=e;
+        if(['AUTH_REQUIRED','UNAUTHENTICATED','FORBIDDEN'].includes(e.code)){
+          libraryDocuments=[];cursor=null;libraryCache.clear();previews.clear();bar(false);
+        }
+      }
+    }finally {
+      if(ticket===generation){libraryRequest=0;renderLibrary();}
+    }
   }
 
   function mountPreview(d,started=performance.now()) {
@@ -258,7 +302,8 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
       queuePreviews([d.pages[at+1],d.pages[at-1]].filter(Boolean).map(pagePath=>({documentId:d.documentId,versionId:d.versionId,pagePath})));
     }catch(e){if(ticket===generation){
       previews.clear();clean();bar(false);$('title').textContent='';
-      $('preview').replaceChildren(create('p',e.message),button('再試行',()=>open(documentId,versionId,pagePath,fragment)),button('文書一覧',()=>library()));
+      const authLink=authorizationLink(e);
+      $('preview').replaceChildren(create('p',e.message),...(authLink?[authLink]:[]),button('再試行',()=>open(documentId,versionId,pagePath,fragment)),button('文書一覧',()=>library()));
     }}
   }
   function applyComments(result,renderNow=true) {
@@ -447,7 +492,11 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
     if(current?.documentId===d.documentId&&current?.versionId===d.versionId&&current?.pagePath===path&&mode)historyPage(current,mode);
   }
   $('pages').onchange=()=>navigatePage($('pages').value);
-  $('search').oninput=renderLibrary;
+  $('search').oninput=()=>{
+    renderLibrary();
+    if($('search').value.trim()&&cursor&&!libraryBusy()&&!libraryError)void library(true);
+  };
+  $('library-refresh').onclick=()=>library();
   $('archive-view').onclick=()=>{archiveView=!archiveView;$('archive-view').setAttribute('aria-pressed',String(archiveView));library();};
   $('manage-cancel').onclick=()=>$('manage-dialog').close();
   $('manage-form').onsubmit=async e=>{
