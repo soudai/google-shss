@@ -21,9 +21,13 @@ export function createCaller(api, {busyDelays = BUSY_DELAYS, wait = sleep, rando
   return async function call(action, input = {}) {
     const request = action === 'getDocument' ? {...input, acceptHtmlGzip: true} : input;
     const retryBusy = action === 'manageDocument' || action === 'importDocument';
+    const retryList=action==='listDocuments';
     for (let attempt = 0; ; attempt++) {
       let reply;
-      try {reply = await api(action, request);} catch {throw new Error(NETWORK_ERROR);}
+      try {reply = await api(action, request);} catch {
+        if(retryList&&attempt<busyDelays.length){await wait(busyDelays[attempt]*(0.5+random()));continue;}
+        throw new Error(NETWORK_ERROR);
+      }
       if (reply?.ok) {
         if (action === 'getDocument' && reply.value?.htmlGzip !== undefined) {
           const {htmlGzip, ...value} = reply.value;
@@ -32,7 +36,8 @@ export function createCaller(api, {busyDelays = BUSY_DELAYS, wait = sleep, rando
         }
         return reply.value;
       }
-      if (retryBusy && reply?.error?.code === 'BUSY' && attempt < busyDelays.length) {
+      const retryRead=retryList&&reply?.error?.retryable===true&&['INTERNAL','BUSY','LIST_INCOMPLETE'].includes(reply.error.code);
+      if (((retryBusy && reply?.error?.code === 'BUSY')||retryRead) && attempt < busyDelays.length) {
         await wait(busyDelays[attempt] * (0.5 + random()));
         continue;
       }

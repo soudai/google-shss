@@ -41,6 +41,29 @@ Previously fetched pages display from the current tab's memory cache. When recen
 
 Large preview HTML is transferred with gzip compression. Drive reads are grouped, and comment saves check current permissions, the file version and checksum inside the write lock before reusing cached JSON. Initial loads and confirmed saves still depend on Apps Script, Drive and network latency; completion within one second is not guaranteed.
 
+## Document library, search, and archives
+
+The library shows previously fetched results while refreshing them. Search continues through later pages, including empty intermediate pages. Loading and connection failures are shown separately from an empty result. Use **再読み込み** (Reload) to refresh the library.
+
+Choosing **アーカイブ** (Archive) moves the entire document folder into a dedicated `archive` folder inside the storage root. The normal library queries only the root's direct children, so archived documents, manifests and versions are excluded from its reads. The `archive` folder is searched only when the archive view is opened. **戻す** (Restore) moves the document back to the root.
+
+```text
+Storage root/
+  Active document/
+  archive/
+    Archived document/
+```
+
+The dedicated folder is created on the first archive operation. Moving requires permission to move the document folder and add it to the destination. Document IDs, version links, HTML and comments are preserved. Archiving does not revoke sharing; access still follows Drive permissions after the move. Backups include both locations.
+
+If required permissions were not selected during authorization, SHSS shows **アクセスを許可** (Authorize access) before loading documents. Review and grant the Google Drive and account information permissions, return to SHSS, and select **再読み込み** (Reload).
+
+### Migrating older archives
+
+Earlier versions kept archived folders in the storage root and marked them in the manifest. After updating and redeploying, the storage administrator should run **migrateArchivedDocuments_** in the Apps Script editor to move them into `archive`. Each run processes up to 20 documents. Repeat until the execution log reports `hasMore: false`. If `skipped` is nonzero, resolve the administrator's edit and move permissions first.
+
+The migration changes folder placement and identification metadata without rewriting HTML, comments or manifest contents. Active documents stay in the root. Refresh both library views after completion. Each separately deployed domain needs its own Apps Script update, redeployment and migration. Before rolling back to a version without archive-folder support, restore archived documents to the normal library.
+
 ## Requirements
 
 - A Google Workspace account with access to Apps Script and Google Drive

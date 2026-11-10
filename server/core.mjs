@@ -55,7 +55,7 @@ function validVersion(v) {
     && (!v.packageHash||hash(v.packageHash)) && (!v.sourceFileId||token(v.sourceFileId)) && (!v.sourceVersion||str(v.sourceVersion,128))
     && (v.pages===undefined ? token(v.htmlFileId) : validPackage(v));
 }
-function validateManifest(m, id) {
+export function validateManifest(m, id) {
   if (!plain(m) || ![1,2].includes(m.schemaVersion) || m.documentId!==id || !str(m.title,160) || !token(m.commentsFileId) || !token(m.versionsFolderId)
     || !Array.isArray(m.versions) || !m.versions.length || m.versions.length>MAX_VERSIONS || !m.versions.every(validVersion)
     || (m.schemaVersion===1&&m.versions.some(v=>v.pages!==undefined)) || !unique(m.versions,'versionId')
@@ -124,6 +124,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     if(!record) absent();
     return {...record, id, manifest:validateManifest(json(record.manifestText),id)};
   }
+  const isArchived=d=>d.archived??!!d.manifest.archivedAt;
   function resolveVersion(record,id,pagePath) {
     if(id!==undefined&&!token(id)) invalid();
     const v=record.manifest.versions.find(v=>v.versionId===(id??record.manifest.latestVersionId));
@@ -289,7 +290,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
     listDocuments(input) {
       if(!optional(input.cursor,c=>str(c,4096))) invalid();
       if(!optional(input.archived,a=>typeof a==='boolean'))invalid();
-      const {ids,cursor}=store.listDocuments(input.cursor);
+      const {ids,cursor}=store.listDocuments(input.cursor,{archived:!!input.archived});
       // Documents the caller cannot read, or that are damaged, are left out of the list.
       const readable=fn=>{
         try {return fn();}
@@ -297,10 +298,10 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       };
       const candidates=ids.flatMap(id=>readable(()=>{
         const d=document(id);
-        const {title,latestVersionId,archivedAt,updatedAt,versions}=d.manifest;
-        const canManage=store.canManage(d);
-        if(!!archivedAt!==!!input.archived||(input.archived&&!canManage))return [];
-        return [{ref:resolveVersion(d),summary:{documentId:id,title,latestVersionId,updatedAt:updatedAt||versions.at(-1).createdAt,canManage}}];
+        const {title,latestVersionId,updatedAt,versions}=d.manifest;
+        const canManage=store.canManage(d),canArchive=store.canArchive?store.canArchive(d):canManage;
+        if(isArchived(d)!==!!input.archived||(input.archived&&!canManage&&!canArchive))return [];
+        return [{ref:resolveVersion(d),summary:{documentId:id,title,latestVersionId,updatedAt:updatedAt||versions.at(-1).createdAt,canManage,canArchive}}];
       }));
       store.prefetchVersions?.(candidates.map(({ref})=>ref));
       const documents=candidates.flatMap(({ref,summary})=>readable(()=>{
@@ -326,7 +327,7 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       }
       return {documentId:d.id,title:d.manifest.title,versionId:v.versionId,sourceHash:v.sourceHash,...(v.packageHash?{packageHash:v.packageHash}:{}),pageHash:ref.pageHash,...(htmlUnchanged?{htmlUnchanged:true}:{html}),pagePath:ref.pagePath,pages:v.pages?.map(p=>p.path)||[DEFAULT_PAGE],
         versions:d.manifest.versions.map(({versionId,createdAt})=>({versionId,createdAt})),
-        canReadComments:!!file,canWriteComments:!!file?.canEdit,canAppend:store.canAppend(d),canManage:store.canManage(d),archived:!!d.manifest.archivedAt,
+        canReadComments:!!file,canWriteComments:!!file?.canEdit,canAppend:store.canAppend(d),canManage:store.canManage(d),archived:isArchived(d),
         comments:comments ? snapshot(comments,v,actor,!!file.canEdit,commentVersion(file,v,actor,ref.pagePath),ref.pagePath) : null,commentsError};
     },
     getComments(input,actor) {
@@ -343,6 +344,14 @@ export function createService({store, identity, digest, uuid, now, locked}) {
       if(input.type==='rename'&&!title(input.title))invalid();
       return locked(()=>{
         const d=document(input.documentId);
+        if(input.type!=='rename'&&store.moveDocument){
+          if(!store.canArchive(d))denied();
+          const archived=input.type==='archive';
+          // The parent change and storage marker commit in one Drive request.
+          // Keeping archive state out of JSON avoids a half-completed move.
+          store.moveDocument(d,archived);
+          return {documentId:d.id,title:d.manifest.title,archived};
+        }
         if(!store.canManage(d))denied();
         const m={...d.manifest,updatedAt:now()};
         if(input.type==='rename')m.title=input.title.trim();

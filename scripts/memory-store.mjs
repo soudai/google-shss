@@ -20,7 +20,7 @@ export function memoryStore({canImport = true, canEditComments = true, canManage
     findDocument(docId) {
       const doc = docs.get(docId);
       if (!doc) return null;
-      return {manifestId: doc.manifestId, manifestCanEdit: store.permissions.canManage, manifestText: files.get(doc.manifestId).text};
+      return {manifestId: doc.manifestId, manifestCanEdit: store.permissions.canManage, manifestText: files.get(doc.manifestId).text,archived:doc.archived};
     },
     htmlFile(docId, versionsId, version) {return files.get(version.htmlFileId);},
     pageFile(docId, versionsId, version, page) {return files.get(page.htmlFileId);},
@@ -47,15 +47,17 @@ export function memoryStore({canImport = true, canEditComments = true, canManage
     listSources: () => ({files: [], cursor: null}),
     findImportedSource: sourceFileId => [...docs].find(([, doc]) => doc.sourceFileId === sourceFileId)?.[0] || null,
     // Newest first, like the Drive listing.
-    listDocuments: () => ({ids: [...docs.keys()].reverse(), cursor: null}),
+    listDocuments: (_cursor,{archived=false}={}) => ({ids: [...docs.keys()].reverse().filter(id=>(docs.get(id).archived??!!JSON.parse(files.get(docs.get(id).manifestId).text).archivedAt)===archived), cursor: null}),
     canImport: () => store.permissions.canImport,
     canManage: d => d.manifestCanEdit === true,
+    canArchive: () => store.permissions.canManage,
+    moveDocument: (d,archived) => {docs.get(d.id).archived=archived;},
     canAppend: d => d.manifestCanEdit === true,
     createDocument(title, manifestFor, sourceFileId) {
       const docId = id('d');
       const commentsFileId = put(JSON.stringify({schemaVersion: 1, documentId: docId, revision: 0, threads: [], appliedOperations: []}));
       const m = manifestFor({id: docId, manifest: {versionsFolderId: id('vf'), commentsFileId}});
-      docs.set(docId, {manifestId: put(JSON.stringify(m)), sourceFileId});
+      docs.set(docId, {manifestId: put(JSON.stringify(m)), sourceFileId,archived:false});
       return {documentId: docId, versionId: m.latestVersionId};
     },
     createVersion(parent, versionId, text) {
