@@ -129,7 +129,7 @@ function digest_(text) {return hex_(typeof text==='string'?Utilities.computeDige
 // a manifest cannot point outside its document.
 function driveStore_(root) {
   const folder=FOLDER_MIME_;
-  const fields='id,name,mimeType,parents,trashed,size,version,sha256Checksum,appProperties,capabilities(canDownload,canEdit,canModifyContent,canAddChildren)';
+  const fields='id,name,mimeType,parents,trashed,size,version,sha256Checksum,appProperties,capabilities(canDownload,canEdit,canModifyContent,canAddChildren,canMoveItemWithinDrive)';
   const metadata=new Map(), preparedDocuments=new Set();
   const fail=(code,message)=>{throw new SHSSCore.AppError(code,message);};
   const notFound=()=>fail('NOT_FOUND','文書または版が見つかりません。');
@@ -150,7 +150,8 @@ function driveStore_(root) {
   const child=(f,parent,mime)=>!!(f&&f.mimeType===mime&&f.parents?.includes(parent));
   const writable=f=>f?.capabilities?.canEdit===true&&f?.capabilities?.canModifyContent===true;
   function list(parent,where,limit,cursor) {
-    return Drive.Files.list({q:`'${parent}' in parents and trashed = false and ${where}`,fields:`nextPageToken,incompleteSearch,files(${fields})`,pageSize:limit,pageToken:cursor,orderBy:'createdTime desc',supportsAllDrives:true,includeItemsFromAllDrives:true});
+    const parents=Array.isArray(parent)?parent:[parent],scope=parents.map(id=>"'"+id+"' in parents").join(' or ');
+    return Drive.Files.list({q:`(${scope}) and trashed = false and ${where}`,fields:`nextPageToken,incompleteSearch,files(${fields})`,pageSize:limit,pageToken:cursor,orderBy:'createdTime desc',supportsAllDrives:true,includeItemsFromAllDrives:true});
   }
   function prefetch(clauses) {
     if(!clauses.length)return;
@@ -315,13 +316,50 @@ function driveStore_(root) {
     const file={name,mimeType:mime,parents:[parent],appProperties};
     return Drive.Files.create(file,text===undefined?null:Utilities.newBlob(text,mime,name),options).id;
   }
-  function write(id,mime,text,appProperties) {
-    try {return Drive.Files.update(appProperties?{appProperties}:{},id,Utilities.newBlob(text,mime),{fields:'version',supportsAllDrives:true});}
+  function write(id,mime,text) {
+    try {return Drive.Files.update({},id,Utilities.newBlob(text,mime),{fields:'version',supportsAllDrives:true});}
     catch(e){if(unavailable(e))forbidden();throw e;}
   }
   function canAdd(id) {const f=meta(id);return f?.mimeType===folder && f.capabilities?.canAddChildren===true;}
+  let archiveId;
+  function archiveFolder(createIfMissing=false) {
+    const props=PropertiesService.getScriptProperties(),key='SHSS_ARCHIVE_LOCATION';
+    if(archiveId===undefined){
+      let saved;try{saved=JSON.parse(props.getProperty(key)||'null');}catch{}
+      archiveId=saved?.root===root&&idOk(saved.id)?saved.id:null;
+      if(!archiveId){
+        const matches=list(root,`mimeType = '${folder}' and appProperties has { key='shss' and value='archive' }`,2);
+        if((matches.files||[]).length>1)fail('CONFIG','SHSSのarchiveフォルダが複数あります。管理者に確認してください。');
+        archiveId=matches.files?.[0]?.id||null;
+        if(archiveId)props.setProperty(key,JSON.stringify({root,id:archiveId}));
+      }
+    }
+    if(!archiveId&&createIfMissing){
+      if(!canAdd(root))forbidden();
+      archiveId=create(root,'archive',folder,undefined,{shss:'archive'});
+      props.setProperty(key,JSON.stringify({root,id:archiveId}));
+    }
+    return archiveId;
+  }
+  function moveDocument(d,archived) {
+    const f=meta(d.id);
+    if(f?.capabilities?.canEdit!==true||f.capabilities.canMoveItemWithinDrive!==true)forbidden();
+    const destination=archived?archiveFolder(true):root,target=meta(destination);
+    // Move within the configured root. Never accept a caller-selected parent.
+    if(!target||target.mimeType!==folder||target.capabilities?.canAddChildren!==true
+      ||(archived&&(!child(target,root,folder)||target.appProperties?.shss!=='archive')))forbidden();
+    const changingParent=!f.parents?.includes(destination);
+    if(!changingParent&&f.appProperties?.shssStorage==='folders-v1')return;
+    try {
+      Drive.Files.update({appProperties:{shssStorage:'folders-v1'}},d.id,null,{
+        ...(changingParent?{addParents:destination,removeParents:(f.parents||[]).join(',')}:{}),
+        fields:'id',supportsAllDrives:true
+      });
+      metadata.delete(d.id);
+    }catch(e){if(unavailable(e))forbidden();throw e;}
+  }
   return {
-    clearMetadata() {metadata.clear();preparedDocuments.clear();cachedTexts.clear();cacheMisses.clear();downloads.clear();pathHints.clear();},
+    clearMetadata() {archiveId=undefined;metadata.clear();preparedDocuments.clear();cachedTexts.clear();cacheMisses.clear();downloads.clear();pathHints.clear();},
     preloadFiles,
     prefetchVersions(refs) {
       const clauses=new Set();
@@ -347,11 +385,23 @@ function driveStore_(root) {
         .map(f=>({id:f.id,name:f.name,version:f.version||null})),cursor:page.nextPageToken||null};
     },
     findImportedSource(sourceFileId) {
-      const page=list(root,`mimeType = '${folder}' and appProperties has { key='sourceFileId' and value='${sourceFileId}' }`,20);
-      return (page.files||[]).find(f=>f.appProperties?.shss==='document')?.id||null;
+      const find=parent=>{
+        const page=list(parent,`mimeType = '${folder}' and appProperties has { key='sourceFileId' and value='${sourceFileId}' }`,20);
+        return (page.files||[]).find(f=>f.appProperties?.shss==='document')?.id||null;
+      };
+      const active=find(root);if(active)return active;
+      const archive=archiveFolder();return archive?find(archive):null;
     },
     listDocuments(cursor,{archived}={}) {
-      const page=list(root,`mimeType = '${folder}' and appProperties has { key='shss' and value='document' }`,20,cursor);
+      let parent=root;
+      // Normal views never inspect the archive. Maintenance uses one union
+      // query so a move between the two folders cannot shift its page boundary.
+      if(archived!==false){
+        const archive=archiveFolder();
+        if(archived===true){if(!archive)return {ids:[],cursor:null};parent=archive;}
+        else if(archive)parent=[root,archive];
+      }
+      const page=list(parent,`mimeType = '${folder}' and appProperties has { key='shss' and value='document' }`,20,cursor);
       if(page.incompleteSearch)throw new SHSSCore.AppError('LIST_INCOMPLETE','Driveの検索を完了できませんでした。再読み込みしてください。',true);
       const files=page.files||[],ids=[],manifests=[];
       for(const file of files)metadata.set(file.id,file);
@@ -359,12 +409,6 @@ function driveStore_(root) {
       for(const file of files){
         const manifest=metadata.get(file.appProperties?.manifest)||meta(file.appProperties?.manifest);
         if(!child(manifest,file.id,'application/json')||manifest.name!=='manifest.json'||!manifest.capabilities?.canDownload)continue;
-        // The archive hint is saved with the manifest in one Drive update.
-        // Ignore it after an external edit; permissions and content stay authoritative.
-        const props=manifest.appProperties||{},checksum=manifest.sha256Checksum?.toLowerCase();
-        if(typeof archived==='boolean'&&/^[a-f0-9]{64}$/.test(checksum||'')&&props.shssArchiveHash===checksum
-          &&['true','false'].includes(props.shssArchived)&&(props.shssArchived==='true')!==archived)continue;
-        if(archived&&!writable(manifest))continue;
         ids.push(file.id);
         if(Number(manifest.size)<=MAX_JSON_BYTES_)manifests.push(manifest);
       }
@@ -373,11 +417,14 @@ function driveStore_(root) {
     },
     findDocument(id) {
       const f=meta(id);
-      if(!child(f,root,folder)||f.trashed||f.appProperties?.shss!=='document')return null;
+      if(!f||f.mimeType!==folder||f.trashed||f.appProperties?.shss!=='document')return null;
+      const inRoot=child(f,root,folder);
+      if(!inRoot&&!f.parents?.includes(archiveFolder()))return null;
       prepareDocuments([id]);
       const manifest=meta(f.appProperties.manifest);
       if(!child(manifest,id,'application/json')||manifest.name!=='manifest.json'||!manifest.capabilities?.canDownload)return null;
-      return {manifestId:manifest.id,manifestCanEdit:writable(manifest),manifestText:readCachedText(manifest,MAX_JSON_BYTES_)};
+      return {manifestId:manifest.id,manifestCanEdit:writable(manifest),manifestText:readCachedText(manifest,MAX_JSON_BYTES_),
+        ...(!inRoot?{archived:true}:f.appProperties?.shssStorage==='folders-v1'?{archived:false}:{})};
     },
     htmlFile(docId, versionsId, version) {
       if(!child(meta(versionsId),docId,folder)||!child(meta(version.folderId),versionsId,folder))notFound();
@@ -419,6 +466,8 @@ function driveStore_(root) {
     },
     canImport: ()=>!!canAdd(root),
     canManage: d=>d.manifestCanEdit===true,
+    canArchive: d=>meta(d.id)?.capabilities?.canEdit===true&&meta(d.id)?.capabilities?.canMoveItemWithinDrive===true,
+    moveDocument,
     canAppend(d) {
       const versions=meta(d.manifest.versionsFolderId);
       return child(versions,d.id,folder)&&versions.capabilities?.canAddChildren===true&&d.manifestCanEdit===true;
@@ -428,10 +477,9 @@ function driveStore_(root) {
       const versionsFolderId=create(id,'versions',folder);
       const commentsFileId=create(id,'comments.json','application/json',JSON.stringify({schemaVersion:1,documentId:id,revision:0,threads:[],appliedOperations:[]}));
       const m=manifestFor({id,manifest:{versionsFolderId,commentsFileId}});
-      const text=JSON.stringify(m);
-      const manifest=create(id,'manifest.json','application/json',text,{shssArchived:'false',shssArchiveHash:digest_(text)});
+      const manifest=create(id,'manifest.json','application/json',JSON.stringify(m));
       // Publish the folder to the index only after its files exist.
-      Drive.Files.update({appProperties:{shss:'document',manifest,...(sourceFileId?{sourceFileId}:{})}},id,null,{fields:'id',supportsAllDrives:true});
+      Drive.Files.update({appProperties:{shss:'document',shssStorage:'folders-v1',manifest,...(sourceFileId?{sourceFileId}:{})}},id,null,{fields:'id',supportsAllDrives:true});
       return {documentId:id,versionId:m.latestVersionId};
     },
     createVersion(parent,versionId,html) {
@@ -452,19 +500,28 @@ function driveStore_(root) {
       }
       return {versionId,folderId,startPage:pkg.startPage,files,pages,...(files.some(f=>f.mime==='image/svg+xml')?{svgPolicyVersion:SHSSCore.SVG_POLICY_VERSION}:{})};
     },
-    indexArchive(id) {
-      const d=this.findDocument(id);
-      if(!d?.manifestCanEdit)return 'skipped';
-      const m=SHSSCore.validateManifest(JSON.parse(d.manifestText),id),checksum=digest_(d.manifestText);
-      const props=meta(d.manifestId)?.appProperties||{},archived=m.archivedAt?'true':'false';
-      if(props.shssArchiveHash===checksum&&props.shssArchived===archived)return 'unchanged';
-      Drive.Files.update({appProperties:{shssArchived:archived,shssArchiveHash:checksum}},d.manifestId,null,{fields:'id',supportsAllDrives:true});
-      return 'indexed';
+    listLegacyDocuments() {
+      // A processed folder leaves this query, so moving folders cannot shift
+      // a saved page cursor and accidentally skip the next batch.
+      const page=list(root,`mimeType = '${folder}' and appProperties has { key='shss' and value='document' } and not appProperties has { key='shssStorage' and value='folders-v1' }`,20);
+      if(page.incompleteSearch)throw new SHSSCore.AppError('LIST_INCOMPLETE','Driveの検索を完了できませんでした。再実行してください。',true);
+      return {ids:(page.files||[]).map(f=>f.id),hasMore:!!page.nextPageToken};
     },
-    writeManifest(d,m) {
-      const text=JSON.stringify(m);
-      return write(d.manifestId,'application/json',text,{shssArchived:m.archivedAt?'true':'false',shssArchiveHash:digest_(text)});
+    migrateArchive(id) {
+      const d=this.findDocument(id),f=meta(id);
+      if(!d||f?.capabilities?.canEdit!==true)return 'skipped';
+      if(f.appProperties?.shssStorage==='folders-v1')return 'unchanged';
+      const m=SHSSCore.validateManifest(JSON.parse(d.manifestText),id);
+      if(m.archivedAt){
+        if(!this.canArchive({id}))return 'skipped';
+        moveDocument({id},true);
+        return 'moved';
+      }
+      Drive.Files.update({appProperties:{shssStorage:'folders-v1'}},id,null,{fields:'id',supportsAllDrives:true});
+      metadata.delete(id);
+      return 'unchanged';
     },
+    writeManifest: (d,m)=>write(d.manifestId,'application/json',JSON.stringify(m)),
     // Trashes a version folder that was never recorded in the manifest.
     discardVersion(folderId) {
       if(idOk(folderId))Drive.Files.update({trashed:true},folderId,null,{fields:'id',supportsAllDrives:true});
@@ -474,25 +531,21 @@ function driveStore_(root) {
 
 // Run from the Apps Script editor as the storage administrator. The trailing
 // underscore keeps these maintenance functions unavailable to google.script.run.
-// Upgrade existing manifests' metadata without rewriting their JSON or HTML.
-// Run again until hasMore is false. The cursor is scoped to the operator/root.
-function indexDocumentArchives_() {
-  const config=configuration_(),props=PropertiesService.getUserProperties(),key='shss-archive-index';
-  const saved=JSON.parse(props.getProperty(key)||'null');
-  const store=driveStore_(config.root),page=store.listDocuments(saved?.root===config.root?saved.cursor:null);
-  const result={indexed:0,unchanged:0,skipped:0,hasMore:!!page.cursor};
+// Move archives saved by older versions into the dedicated archive folder.
+// Run again until hasMore is false; fix permissions first if skipped is nonzero.
+function migrateArchivedDocuments_() {
+  const config=configuration_(),store=driveStore_(config.root),page=store.listLegacyDocuments();
+  const result={moved:0,unchanged:0,skipped:0,hasMore:page.hasMore};
   for(const id of page.ids){
     const status=withScriptLock_(()=>{
       store.clearMetadata();
-      return store.indexArchive(id);
+      return store.migrateArchive(id);
     },()=>new Error('保存処理中です。時間をおいて再実行してください。'));
     result[status]++;
   }
-  if(page.cursor)props.setProperty(key,JSON.stringify({root:config.root,cursor:page.cursor}));else props.deleteProperty(key);
   console.log(JSON.stringify(result));
   return result;
 }
-
 
 function backupAllComments_() {
   const BACKUPS_PER_DOCUMENT=10;

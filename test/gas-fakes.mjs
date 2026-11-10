@@ -17,15 +17,16 @@ const FOLDER = 'application/vnd.google-apps.folder';
 
 export function gasEnvironment({domain = 'example.com', email = 'user@example.com', longIds = false} = {}) {
   let nextId = 0;
-  const files = new Map(), cache = new Map(),userProperties=new Map();
+  const files = new Map(), cache = new Map();
   const counts = {metadataGet: 0, metadataList: 0, writes: 0, driveAppReads: 0, fetchAll: 0, fetched: 0, cacheGet: 0, cacheGetAll: 0};
   const env = {files, counts, requests: [], fetchAllFails: false, corruptDownloads: false};
   const ROOT = 'root1';
-  const capabilities = {canDownload: true, canEdit: true, canModifyContent: true, canAddChildren: true};
+  const properties=new Map([['SHSS_ROOT_FOLDER_ID',ROOT],['SHSS_DOMAIN',domain]]);env.properties=properties;
+  const capabilities = {canDownload: true, canEdit: true, canModifyContent: true, canAddChildren: true, canMoveItemWithinDrive:true};
   const put = (meta, content) => {
     const id = meta.id || 'f' + String(++nextId).padStart(longIds ? (typeof longIds==='number'?longIds:43) : 1, '0');
     const bytes = content === undefined ? undefined : Buffer.from(content);
-    files.set(id, {mimeType: FOLDER, parents: [], appProperties: {}, ...meta, id, trashed: false, version: '1', capabilities,
+    files.set(id, {mimeType: FOLDER, parents: [], appProperties: {}, ...meta, parents:Array.from(meta.parents||[]), id, trashed: false, version: '1', capabilities,
       ...(bytes ? {content: bytes, size: String(bytes.length), sha256Checksum: sha256(bytes)} : {})});
     return id;
   };
@@ -37,24 +38,27 @@ export function gasEnvironment({domain = 'example.com', email = 'user@example.co
   const Drive = {
     About: {get: () => ({user: {permissionId: 'u1', displayName: 'User', emailAddress: email}})},
     Files: {
-      get(id) {env.requests.push({method:'get',id});counts.metadataGet++; const f = files.get(id); if (!f) throw new Error('File not found: ' + id); return view(f);},
+      get(id) {env.requests.push({method:'get',id});counts.metadataGet++; const f = files.get(id); if (!f||env.deniedMetadata?.has(id)) throw new Error('File not found: ' + id); return view(f);},
       // Understands the query shapes Code.gs sends: parents, names and appProperties.
       list({q,pageToken,pageSize=100}) {
         env.requests.push({method:'list',q});counts.metadataList++;
         const parents = [...q.matchAll(/'([\w-]+)' in parents/g)].map(m => m[1]);
         const names = [...q.matchAll(/name = '([^']+)'/g)].map(m => m[1]);
-        const props = [...q.matchAll(/key='(\w+)' and value='([^']+)'/g)];
+        const props = [...q.matchAll(/(not )?appProperties has \{ key='(\w+)' and value='([^']+)' \}/g)];
         const mime = q.match(/mimeType = '([^']+)'/)?.[1];
         const list = [...files.values()].filter(f => !f.trashed && f.parents.some(p => parents.includes(p))
           && (!names.length || names.includes(f.name)) && (!mime || f.mimeType === mime)
-          && props.every(([, key, value]) => f.appProperties?.[key] === value));
+          && props.every(([,not,key,value]) => not?f.appProperties?.[key]!==value:f.appProperties?.[key]===value));
         const start=Number(pageToken)||0,end=start+Math.min(pageSize,env.listPageSize||100);
         return {incompleteSearch:!!env.incompleteSearch,files:list.slice(start,end).map(view),...(end<list.length?{nextPageToken:String(end)}:{})};
       },
       create(meta, data) {return {id: put(meta, data ? data.bytes : undefined)};},
-      update(meta, id, data) {
+      update(meta, id, data, options={}) {
         counts.writes++;
         const f = files.get(id);
+        if(options.addParents&&env.moveFails)throw new Error('Insufficient file permissions');
+        if(options.removeParents)f.parents=f.parents.filter(p=>!options.removeParents.split(',').includes(p));
+        if(options.addParents)f.parents=[...new Set([...f.parents,...options.addParents.split(',')])];
         if (meta.appProperties) f.appProperties = {...f.appProperties, ...meta.appProperties};
         if (meta.trashed) f.trashed = true;
         if (data) {f.content = data.bytes; f.size = String(data.bytes.length); f.sha256Checksum = sha256(data.bytes);}
@@ -100,7 +104,7 @@ export function gasEnvironment({domain = 'example.com', email = 'user@example.co
         return {getResponseCode: () => env.redirectDownloads ? 302 : ok ? 200 : 404, getContent: () => signed(bytes), getContentText: () => bytes.toString('utf8')};
       });
     }},
-    PropertiesService: {getScriptProperties: () => ({getProperty: key => ({SHSS_ROOT_FOLDER_ID: ROOT, SHSS_DOMAIN: domain})[key] ?? null}),getUserProperties:()=>({getProperty:key=>userProperties.get(key),setProperty:(key,value)=>userProperties.set(key,value),deleteProperty:key=>userProperties.delete(key)})},
+    PropertiesService: {getScriptProperties: () => ({getProperty:key=>properties.get(key)??null,setProperty:(key,value)=>properties.set(key,value)})},
     Session: {getActiveUser: () => ({getEmail: () => email}), getEffectiveUser: () => ({getEmail: () => email})},
     LockService: {getScriptLock: () => ({
       tryLock() {
@@ -118,7 +122,8 @@ export function gasEnvironment({domain = 'example.com', email = 'user@example.co
     return JSON.parse(JSON.stringify(reply));
   };
   env.store=()=>context.driveStore_(ROOT);
-  env.indexArchives=()=>context.indexDocumentArchives_();
+  env.backupComments=()=>context.backupAllComments_();
+  env.migrateArchives=()=>context.migrateArchivedDocuments_();
   env.resetCounts = () => {env.requests.length=0;for (const key of Object.keys(counts)) counts[key] = 0;};
   env.clearCache = () => cache.clear();
   return env;

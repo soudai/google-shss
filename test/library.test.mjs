@@ -23,22 +23,28 @@ test('cold lists avoid repeated cache lookups and do not fetch HTML or comments'
   assert.ok(downloadIds(env).every(id=>env.files.get(id).name==='manifest.json'));
 });
 
-test('archives are skipped before downloading manifests; restore keeps fixed URLs',()=>{
+test('archiving moves folders out of the root query and restore keeps fixed URLs',()=>{
   const env=gasEnvironment({longIds:true}),refs=[];
   for(let i=0;i<20;i++)refs.push(add(env,'Document '+i));
   for(const ref of refs.slice(0,19))ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}));
   cold(env);
   assert.deepEqual(ok(env.rpc('listDocuments',{})).documents.map(d=>d.documentId),[refs[19].documentId]);
   assert.deepEqual(downloadIds(env),[manifest(env,refs[19].documentId).id]);
-  const archived=manifest(env,refs[0].documentId);
+  const archive=[...env.files.values()].find(f=>f.appProperties?.shss==='archive');
+  assert.equal(archive.name,'archive');assert.deepEqual(archive.parents,['root1']);
+  for(const ref of refs.slice(0,19)){
+    assert.deepEqual(env.files.get(ref.documentId).parents,[archive.id]);
+    assert.ok(!env.requests.some(r=>r.id===ref.documentId||r.q?.includes("'"+ref.documentId+"'")));
+  }
   cold(env);
   assert.equal(ok(env.rpc('listDocuments',{archived:true})).documents.length,19);
   assert.ok(!downloadIds(env).includes(manifest(env,refs[19].documentId).id));
-  // Maintenance and backups omit the view filter and still enumerate archives.
+  assert.equal(env.store().listDocuments(null,{archived:false}).ids.length,1);
   assert.equal(env.store().listDocuments().ids.length,20);
+  assert.equal(env.store().listDocuments(null,{archived:true}).ids.length,19);
   assert.match(ok(env.rpc('getDocument',refs[0])).html,/Library test/);
   ok(env.rpc('manageDocument',{documentId:refs[0].documentId,type:'restore'}));
-  assert.equal(archived.appProperties.shssArchived,'false');
+  assert.deepEqual(env.files.get(refs[0].documentId).parents,['root1']);
   assert.equal(ok(env.rpc('listDocuments',{})).documents.length,2);
 });
 
@@ -53,34 +59,87 @@ test('unreadable HTML and manifests stay hidden after warming list caches',()=>{
   assert.deepEqual(ok(env.rpc('listDocuments',{})).documents,[]);
 });
 
-test('an archive hint is ignored when manifest content changes externally',()=>{
-  const env=gasEnvironment(),ref=add(env,'Edited');
-  ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}));
-  const m=manifest(env,ref.documentId),state=JSON.parse(m.content);
-  delete state.archivedAt;
+const rewriteManifest=(m,state)=>{
   m.content=Buffer.from(JSON.stringify(state));m.size=String(m.content.length);m.version=String(Number(m.version)+1);
   m.sha256Checksum=createHash('sha256').update(m.content).digest('hex');
-  cold(env);
-  assert.equal(ok(env.rpc('listDocuments',{})).documents[0].title,'Edited');
+};
+
+test('folder location stays authoritative after a legacy archive is restored',()=>{
+  const env=gasEnvironment(),ref=add(env,'Legacy'),m=manifest(env,ref.documentId);
+  delete env.files.get(ref.documentId).appProperties.shssStorage;
+  const state=JSON.parse(m.content);state.archivedAt='2026-11-01T00:00:00.000Z';rewriteManifest(m,state);
+  const original=Buffer.from(m.content);
+  assert.equal(env.migrateArchives().moved,1);
+  assert.equal(ok(env.rpc('getDocument',ref)).archived,true);
+  ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'restore'}));
+  assert.equal(ok(env.rpc('getDocument',ref)).archived,false);
+  assert.equal(ok(env.rpc('listDocuments',{})).documents.length,1);
+  assert.deepEqual(m.content,original,'moving never rewrites the legacy manifest');
 });
 
-test('legacy archive metadata can be upgraded in pages without changing stored content',()=>{
-  const env=gasEnvironment(),originals=new Map();
+test('legacy migration does not skip folders when moves change the result pages',()=>{
+  const env=gasEnvironment(),originals=new Map(),refs=[];
   for(let i=0;i<21;i++){
-    const ref=add(env,'Legacy '+i);
-    if(i<20)ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}));
-    const m=manifest(env,ref.documentId);
-    m.appProperties={};originals.set(m.id,Buffer.from(m.content));
+    const ref=add(env,'Legacy '+i);refs.push(ref);
+    delete env.files.get(ref.documentId).appProperties.shssStorage;
+    const m=manifest(env,ref.documentId),state=JSON.parse(m.content);
+    if(i<20)state.archivedAt='2026-11-01T00:00:00.000Z';
+    rewriteManifest(m,state);originals.set(m.id,Buffer.from(m.content));
   }
-  const first=env.indexArchives(),last=env.indexArchives();
-  assert.equal(first.indexed,20);assert.equal(first.hasMore,true);
-  assert.equal(last.indexed,1);assert.equal(last.hasMore,false);
+  const first=env.migrateArchives(),last=env.migrateArchives();
+  assert.equal(first.moved,20);assert.equal(first.hasMore,true);
+  assert.equal(last.unchanged,1);assert.equal(last.hasMore,false);
+  assert.equal(env.migrateArchives().moved,0);
   for(const [id,bytes] of originals)assert.deepEqual(env.files.get(id).content,bytes);
   cold(env);
-  const firstPage=ok(env.rpc('listDocuments',{}));
-  assert.deepEqual(firstPage.documents,[]);assert.ok(firstPage.cursor);
-  assert.deepEqual(downloadIds(env),[]);
-  assert.equal(ok(env.rpc('listDocuments',{cursor:firstPage.cursor})).documents[0].title,'Legacy 20');
+  const page=ok(env.rpc('listDocuments',{}));
+  assert.equal(page.documents[0].title,'Legacy 20');assert.equal(page.cursor,null);
+  assert.deepEqual(downloadIds(env),[manifest(env,refs[20].documentId).id]);
+  assert.equal(ok(env.rpc('listDocuments',{archived:true})).documents.length,20);
+});
+
+test('failed or forbidden folder moves leave the manifest, content and original location intact',()=>{
+  const env=gasEnvironment(),ref=add(env,'Move guard'),folder=env.files.get(ref.documentId);
+  const original=new Map([...env.files].filter(([,f])=>f.content).map(([id,f])=>[id,Buffer.from(f.content)]));
+  folder.capabilities={...folder.capabilities,canMoveItemWithinDrive:false};
+  assert.equal(ok(env.rpc('listDocuments',{})).documents[0].canArchive,false);
+  assert.equal(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}).error.code,'FORBIDDEN');
+  folder.capabilities={...folder.capabilities,canMoveItemWithinDrive:true};
+  env.moveFails=true;
+  assert.equal(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}).error.code,'FORBIDDEN');
+  assert.deepEqual(folder.parents,['root1']);
+  assert.equal(ok(env.rpc('listDocuments',{})).documents.length,1);
+  for(const [id,bytes] of original)assert.deepEqual(env.files.get(id).content,bytes);
+  env.moveFails=false;
+  ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}));
+  ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'})); // Retry after a lost response.
+  assert.equal([...env.files.values()].filter(f=>f.appProperties?.shss==='archive').length,1);
+  const parent=folder.parents[0];
+  env.files.get('root1').capabilities={...env.files.get('root1').capabilities,canAddChildren:false};
+  assert.equal(env.rpc('manageDocument',{documentId:ref.documentId,type:'restore'}).error.code,'FORBIDDEN');
+  assert.deepEqual(folder.parents,[parent]);
+});
+
+test('fixed URLs work for document-only readers and reject unrelated parent folders',()=>{
+  const env=gasEnvironment(),ref=add(env,'Shared document');
+  ok(env.rpc('manageDocument',{documentId:ref.documentId,type:'archive'}));
+  const folder=env.files.get(ref.documentId),archive=folder.parents[0];
+  env.deniedMetadata=new Set([archive]);
+  cold(env);
+  assert.match(ok(env.rpc('getDocument',ref)).html,/Library test/);
+  assert.ok(!env.requests.some(r=>r.method==='get'&&r.id===archive));
+  folder.parents=['unrelated'];
+  assert.equal(env.rpc('getDocument',ref).error.code,'NOT_FOUND');
+});
+
+test('backups include both the root and archive documents',()=>{
+  const env=gasEnvironment(),a=add(env,'Active'),b=add(env,'Archived');
+  ok(env.rpc('manageDocument',{documentId:b.documentId,type:'archive'}));
+  env.files.set('backup',{...env.files.get('root1'),id:'backup',name:'Private backups',parents:[],appProperties:{}});
+  env.properties.set('SHSS_BACKUP_FOLDER_ID','backup');
+  env.backupComments();
+  const backed=[...env.files.values()].filter(f=>f.parents.includes('backup')).map(f=>f.appProperties.shssBackupDocumentId);
+  assert.deepEqual(backed.sort(),[a.documentId,b.documentId].sort());
 });
 
 test('long Drive IDs are fetched in bounded batches instead of one request per file',()=>{

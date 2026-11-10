@@ -169,6 +169,8 @@ import {isRegionAnchor,isTextAnchor,normalizeAnchor} from '../shared/anchor.mjs'
         li.append(button('名前を変更',()=>{
           manageId=d.documentId;$('manage-name').value=d.title;$('manage-dialog').showModal();
         }));
+      }
+      if(d.canArchive??d.canManage){
         li.append(button(archiveView?'戻す':'アーカイブ',async()=>{
           try {
             await call('manageDocument',{documentId:d.documentId,type:archiveView?'restore':'archive'});documentsChanged();

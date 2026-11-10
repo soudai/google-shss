@@ -45,15 +45,24 @@ Large preview HTML is transferred with gzip compression. Drive reads are grouped
 
 The library shows previously fetched results while refreshing them. Search continues through later pages, including empty intermediate pages. Loading and connection failures are shown separately from an empty result. Use **再読み込み** (Reload) to refresh the library.
 
-The normal library skips manifest downloads and version lookups for documents with a verified archive hint. Open **アーカイブ** (Archives) to view archived documents and choose **戻す** (Restore) to return them to the normal library. Archiving organizes the library; it does not revoke sharing. Existing version links and comments remain available.
+Choosing **アーカイブ** (Archive) moves the entire document folder into a dedicated `archive` folder inside the storage root. The normal library queries only the root's direct children, so archived documents, manifests and versions are excluded from its reads. The `archive` folder is searched only when the archive view is opened. **戻す** (Restore) moves the document back to the root.
+
+```text
+Storage root/
+  Active document/
+  archive/
+    Archived document/
+```
+
+The dedicated folder is created on the first archive operation. Moving requires permission to move the document folder and add it to the destination. Document IDs, version links, HTML and comments are preserved. Archiving does not revoke sharing; access still follows Drive permissions after the move. Backups include both locations.
 
 If required permissions were not selected during authorization, SHSS shows **アクセスを許可** (Authorize access) before loading documents. Review and grant the Google Drive and account information permissions, return to SHSS, and select **再読み込み** (Reload).
 
-### Upgrading existing documents
+### Migrating older archives
 
-Imports and manifest updates, including archive and restore operations, save the archive hint together with the manifest. Older documents remain compatible, but manifests without a hint must be read to determine their archive state.
+Earlier versions kept archived folders in the storage root and marked them in the manifest. After updating and redeploying, the storage administrator should run **migrateArchivedDocuments_** in the Apps Script editor to move them into `archive`. Each run processes up to 20 documents. Repeat until the execution log reports `hasMore: false`. If `skipped` is nonzero, resolve the administrator's edit and move permissions first.
 
-To apply the optimization to existing archives, the storage administrator should run **indexDocumentArchives_** in the Apps Script editor. Each run processes up to 20 documents. Repeat until the execution log reports `hasMore: false`. If `skipped` is nonzero, check that the administrator can edit the documents. This updates library metadata only; it leaves HTML, comments, and manifest contents unchanged. Each separately deployed domain needs its own Apps Script update and redeployment before running this migration.
+The migration changes folder placement and identification metadata without rewriting HTML, comments or manifest contents. Active documents stay in the root. Refresh both library views after completion. Each separately deployed domain needs its own Apps Script update, redeployment and migration. Before rolling back to a version without archive-folder support, restore archived documents to the normal library.
 
 ## Requirements
 
